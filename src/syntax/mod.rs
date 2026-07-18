@@ -1,4 +1,6 @@
+mod binarization;
 mod bit_reader;
+mod cabac;
 mod dispatch;
 mod errors;
 mod extensions;
@@ -12,7 +14,13 @@ mod scaling;
 mod slice;
 mod vui;
 
+pub use binarization::{
+    decode_bins, encode_bins, map_signed_code_num, map_signed_value, Binarization,
+};
 pub use bit_reader::{BitReader, SyntaxDescriptor, SyntaxValue};
+pub use cabac::{
+    derive_cabac_init_type, CabacContext, CabacContextTable, CabacDecoder, CABAC_CONTEXT_COUNT,
+};
 pub use dispatch::{parse_nal_unit_syntax, parse_nal_unit_syntax_from_bytes, NalUnitSyntax};
 pub use errors::SyntaxError;
 pub use extensions::{

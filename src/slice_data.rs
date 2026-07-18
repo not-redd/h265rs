@@ -1,4 +1,6 @@
-use crate::syntax::{BitReader, SliceSegmentHeaderContext, SliceSegmentHeaderSyntax, SyntaxError};
+use crate::syntax::{
+    BitReader, CabacContextTable, SliceSegmentHeaderContext, SliceSegmentHeaderSyntax, SyntaxError,
+};
 
 /// Interface required by Clause 7 for `ae(v)` syntax elements.
 ///
@@ -9,6 +11,23 @@ pub trait CabacReader {
     /// Reads one context-adaptive arithmetic-coded syntax value.
     fn read_ae(&mut self) -> Result<u64, SyntaxError>;
 
+    /// Reads one context-adaptive bin at an explicit Clause 9 context index.
+    /// Structural readers may use their single-value fallback.
+    fn read_ae_context(&mut self, _ctx_idx: usize) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads one bin from a named Clause 9 context table and local index.
+    /// Structural readers retain the single-bin fallback; a real CABAC
+    /// reader maps the pair into its flat context storage.
+    fn read_ae_named(
+        &mut self,
+        _table: CabacContextTable,
+        _ctx_idx: usize,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
     /// Reads a fixed-length PCM sample or other bypass-coded value.
     ///
     /// Clause 9 implementations can override this method. The default keeps
@@ -18,8 +37,222 @@ pub trait CabacReader {
         Err(SyntaxError::ArithmeticCodingUnsupported)
     }
 
+    /// Reads PCM samples from the CABAC-owned bitstream and reinitializes the
+    /// arithmetic engine after the samples, as required by §9.3.2.6.
+    fn read_pcm_samples(
+        &mut self,
+        _luma_sample_count: usize,
+        _chroma_sample_count: usize,
+        _bit_depth_luma: usize,
+        _bit_depth_chroma: usize,
+    ) -> Result<PcmSampleSyntax, SyntaxError> {
+        Err(SyntaxError::ArithmeticCodingUnsupported)
+    }
+
+    /// Reads one bypass-coded CABAC bin.
+    fn read_bypass_bin(&mut self) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads multiple bypass-coded bins, most-significant bit first.
+    fn read_bypass_bits(&mut self, count: usize) -> Result<u64, SyntaxError> {
+        let mut value = 0;
+        for _ in 0..count {
+            value = (value << 1) | self.read_bypass_bin()?;
+        }
+        Ok(value)
+    }
+
+    /// Reads a truncated-Rice coded value using bypass bins.
+    fn read_truncated_rice(
+        &mut self,
+        _c_max: u64,
+        _rice_parameter: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads a truncated-Rice value whose initial unary bins are
+    /// context-coded and remaining bins are bypass-coded.
+    fn read_truncated_rice_context(
+        &mut self,
+        _table: CabacContextTable,
+        _ctx_idx: usize,
+        _context_bins: usize,
+        c_max: u64,
+        rice_parameter: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_truncated_rice(c_max, rice_parameter)
+    }
+
+    /// Reads a truncated-Rice value whose initial bins all use one context
+    /// increment, followed by bypass bins.
+    fn read_truncated_rice_repeated_context(
+        &mut self,
+        _table: CabacContextTable,
+        _ctx_inc: usize,
+        _context_bins: usize,
+        c_max: u64,
+        rice_parameter: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_truncated_rice(c_max, rice_parameter)
+    }
+
+    /// Reads a fixed-length coded value using bypass bins.
+    fn read_fixed_bypass(&mut self, _c_max: u64) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads the context/bypass-coded `part_mode` bin string.
+    fn read_part_mode(
+        &mut self,
+        _is_intra: bool,
+        _at_minimum_size: bool,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `part_mode` with the SPS `amp_enabled_flag` available.
+    fn read_part_mode_with_amp(
+        &mut self,
+        is_intra: bool,
+        at_minimum_size: bool,
+        amp_enabled: bool,
+    ) -> Result<u64, SyntaxError> {
+        let _ = amp_enabled;
+        self.read_part_mode(is_intra, at_minimum_size)
+    }
+
+    /// Reads the context/bypass-coded `inter_pred_idc` bin string.
+    fn read_inter_pred_idc(
+        &mut self,
+        _n_pb_w: u64,
+        _n_pb_h: u64,
+        _ct_depth: usize,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `cu_qp_delta_abs`, including its EG0 suffix when present.
+    fn read_cu_qp_delta_abs(&mut self) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `coeff_abs_level_remaining` with the default Clause 9 Rice state.
+    fn read_coeff_abs_level_remaining(&mut self, _base_level: u64) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `coeff_abs_level_remaining()` with the Rice parameter derived
+    /// from the preceding invocation in the current sub-block.
+    fn read_coeff_abs_level_remaining_with_parameters(
+        &mut self,
+        base_level: u64,
+        _rice_parameter: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_coeff_abs_level_remaining(base_level)
+    }
+
+    /// Reads coefficient-remaining syntax with the extended-precision and
+    /// Rice-state options from §9.3.3.11.
+    fn read_coeff_abs_level_remaining_with_options(
+        &mut self,
+        base_level: u64,
+        rice_parameter: u8,
+        _extended_precision: bool,
+        _log2_transform_range: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_coeff_abs_level_remaining_with_parameters(base_level, rice_parameter)
+    }
+
+    /// Applies CABAC bypass alignment before sign and remaining coefficient
+    /// bins when the active extension requests it.
+    fn cabac_bypass_alignment(&mut self) -> Result<(), SyntaxError> {
+        Ok(())
+    }
+
+    /// Reads an order-`k` Exp-Golomb value using bypass bins.
+    fn read_exp_golomb(&mut self, _order: u8) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads a limited EGk value for extended-precision residual coding.
+    fn read_limited_exp_golomb(
+        &mut self,
+        _rice_parameter: u8,
+        _log2_transform_range: u8,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads a palette value using §9.3.3.12.
+    fn read_palette_value(
+        &mut self,
+        _bit_depth: usize,
+        _cu_transquant_bypass_flag: bool,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `num_palette_indices_minus1` using §9.3.3.14.
+    fn read_palette_num_indices(&mut self, _max_palette_index: u64) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `palette_idx_idc` using truncated-binary bypass bins.
+    fn read_palette_index(
+        &mut self,
+        _max_palette_index: u64,
+        _first: bool,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads `palette_run_prefix` and its context-derived unary bins.
+    fn read_palette_run_prefix(
+        &mut self,
+        _palette_max_run_minus1: u64,
+        _palette_index: u64,
+        _copy_above: bool,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads the optional truncated-binary `palette_run_suffix`.
+    fn read_palette_run_suffix(
+        &mut self,
+        _palette_max_run_minus1: u64,
+        _palette_run_prefix: u64,
+    ) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
+    /// Reads a CABAC termination bin (`ctxTable == 0`, `ctxIdx == 0`).
+    /// The default preserves compatibility with structural test readers.
+    fn read_terminate(&mut self) -> Result<u64, SyntaxError> {
+        self.read_ae()
+    }
+
     /// Reads an `rbsp`-level byte-alignment bit sequence after CABAC syntax.
     fn byte_alignment(&mut self) -> Result<(), SyntaxError>;
+
+    /// Initializes the arithmetic engine for the next CABAC substream after
+    /// a tile/WPP byte-alignment boundary.
+    fn initialize_arithmetic_engine(&mut self) -> Result<(), SyntaxError> {
+        Ok(())
+    }
+
+    /// Restores the context variables for the first CTU of a new tile.
+    fn reset_contexts_to_initial(&mut self) {}
+
+    /// Stores adapted contexts for the next entropy-synchronized CTU row.
+    fn store_wpp_contexts(&mut self) {}
+
+    /// Restores adapted contexts from the preceding entropy-synchronized row.
+    /// Returns `true` when a stored state was available.
+    fn synchronize_wpp_contexts(&mut self) -> bool {
+        false
+    }
 
     /// Finishes `rbsp_slice_segment_trailing_bits()` and returns the number of
     /// consumed `cabac_zero_word` values.
@@ -184,6 +417,38 @@ fn prediction_unit_count(slice_type: u64, part_mode: u64) -> usize {
     }
 }
 
+fn prediction_unit_dimensions(
+    block_size: u64,
+    part_mode: u64,
+    unit_index: usize,
+) -> Option<(u64, u64)> {
+    let half = block_size / 2;
+    let quarter = block_size / 4;
+    match part_mode {
+        0 => Some((block_size, block_size)),
+        1 => Some((block_size, half)),
+        2 => Some((half, block_size)),
+        3 => Some((half, half)),
+        4 | 5 => Some((
+            block_size,
+            if unit_index == 0 {
+                quarter
+            } else {
+                block_size - quarter
+            },
+        )),
+        6 | 7 => Some((
+            if unit_index == 0 {
+                quarter
+            } else {
+                block_size - quarter
+            },
+            block_size,
+        )),
+        _ => None,
+    }
+}
+
 /// Parses `coding_unit()` through its root-CBF decision.
 ///
 /// The returned `transform_tree_required` flag identifies the exact Clause 7
@@ -194,13 +459,35 @@ pub fn parse_coding_unit(
     cabac: &mut impl CabacReader,
     context: CodingUnitContext,
 ) -> Result<CodingUnitSyntax, SyntaxError> {
+    parse_coding_unit_with_skip_context_and_bit_depth(cabac, context, 0, 8, 8, 0, false)
+}
+
+/// Parses one coding unit with the SPS `amp_enabled_flag` supplied to the
+/// Clause 9 `part_mode` binarization.
+pub fn parse_coding_unit_with_amp(
+    cabac: &mut impl CabacReader,
+    context: CodingUnitContext,
+    amp_enabled: bool,
+) -> Result<CodingUnitSyntax, SyntaxError> {
+    parse_coding_unit_with_skip_context_and_bit_depth(cabac, context, 0, 8, 8, 0, amp_enabled)
+}
+
+fn parse_coding_unit_with_skip_context_and_bit_depth(
+    cabac: &mut impl CabacReader,
+    context: CodingUnitContext,
+    skip_context_increment: usize,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    cqt_depth: u32,
+    amp_enabled: bool,
+) -> Result<CodingUnitSyntax, SyntaxError> {
     let cu_transquant_bypass_flag = if context.transquant_bypass_enabled_flag {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::CuTransquantBypass, 0)? != 0)
     } else {
         None
     };
     let cu_skip_flag = if context.slice_type != 2 {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::CuSkip, skip_context_increment)? != 0)
     } else {
         None
     };
@@ -221,7 +508,7 @@ pub fn parse_coding_unit(
         });
     }
     let pred_mode_flag = if context.slice_type != 2 {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::PredMode, 0)? != 0)
     } else {
         None
     };
@@ -230,14 +517,18 @@ pub fn parse_coding_unit(
         && is_intra
         && context.log2_cb_size <= context.max_tb_log2_size
     {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::PaletteMode, 0)? != 0)
     } else {
         None
     };
     let part_mode = if palette_mode_flag == Some(true) {
         0
     } else if !is_intra || context.log2_cb_size == context.min_cb_log2_size {
-        cabac.read_ae()?
+        cabac.read_part_mode_with_amp(
+            is_intra,
+            context.log2_cb_size == context.min_cb_log2_size,
+            amp_enabled,
+        )?
     } else {
         0
     };
@@ -247,7 +538,7 @@ pub fn parse_coding_unit(
             cu_skip_flag,
             pred_mode_flag,
             palette_mode_flag,
-            palette_coding: Some(parse_palette_coding(
+            palette_coding: Some(parse_palette_coding_with_bit_depth(
                 cabac,
                 PaletteCodingContext {
                     n_cb_s: 1usize.checked_shl(u32::from(context.log2_cb_size)).ok_or(
@@ -261,6 +552,8 @@ pub fn parse_coding_unit(
                     chroma_qp_offset_list_len_minus1: context.chroma_qp_offset_list_len_minus1,
                     cu_transquant_bypass_flag: cu_transquant_bypass_flag == Some(true),
                 },
+                bit_depth_luma,
+                bit_depth_chroma,
             )?),
             part_mode,
             pcm_flag: None,
@@ -276,7 +569,7 @@ pub fn parse_coding_unit(
         && context.log2_cb_size >= context.log2_min_ipcm_cb_size
         && context.log2_cb_size <= context.log2_max_ipcm_cb_size
     {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_terminate()? != 0)
     } else {
         None
     };
@@ -309,14 +602,15 @@ pub fn parse_coding_unit(
         let mut mpm_idx = Vec::with_capacity(partition_count);
         let mut rem_intra_luma_pred_mode = Vec::with_capacity(partition_count);
         for _ in 0..partition_count {
-            let prev = cabac.read_ae()? != 0;
+            let prev = cabac.read_ae_named(CabacContextTable::PrevIntraLumaPred, 0)? != 0;
             prev_luma_pred_flags.push(prev);
             if prev {
-                mpm_idx.push(Some(cabac.read_ae()?));
+                mpm_idx.push(Some(cabac.read_truncated_rice(2, 0)?));
                 rem_intra_luma_pred_mode.push(None);
             } else {
                 mpm_idx.push(None);
-                rem_intra_luma_pred_mode.push(Some(cabac.read_ae()?));
+                let mode = cabac.read_fixed_bypass(31)?;
+                rem_intra_luma_pred_mode.push(Some(mode));
             }
         }
         let chroma_count = if context.chroma_array_type == 3 {
@@ -328,7 +622,13 @@ pub fn parse_coding_unit(
         };
         let mut chroma_pred_modes = Vec::with_capacity(chroma_count);
         for _ in 0..chroma_count {
-            chroma_pred_modes.push(cabac.read_ae()?);
+            let first = cabac.read_ae_named(CabacContextTable::IntraChromaPred, 0)?;
+            if first == 0 {
+                chroma_pred_modes.push(4);
+            } else {
+                let suffix = cabac.read_bypass_bits(2)?;
+                chroma_pred_modes.push(suffix);
+            }
         }
         Some(IntraPredictionSyntax {
             prev_luma_pred_flags,
@@ -343,9 +643,21 @@ pub fn parse_coding_unit(
         Vec::new()
     } else {
         let count = prediction_unit_count(context.slice_type, part_mode);
+        let cb_size = block_size(context.log2_cb_size)?;
         let mut units = Vec::with_capacity(count);
-        for _ in 0..count {
-            units.push(parse_prediction_unit(cabac, context.prediction, false)?);
+        for unit_index in 0..count {
+            let dimensions = prediction_unit_dimensions(cb_size, part_mode, unit_index);
+            units.push(match dimensions {
+                Some((n_pb_w, n_pb_h)) => parse_prediction_unit_with_dimensions(
+                    cabac,
+                    context.prediction,
+                    false,
+                    n_pb_w,
+                    n_pb_h,
+                    cqt_depth as usize,
+                )?,
+                None => parse_prediction_unit(cabac, context.prediction, false)?,
+            });
         }
         units
     };
@@ -354,7 +666,7 @@ pub fn parse_coding_unit(
         .is_some_and(|unit| unit.merge_flag == Some(true))
         && part_mode == 0;
     let rqt_root_cbf = if !is_intra && !has_merge_2nx2n {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::RqtRootCbf, 0)? != 0)
     } else {
         None
     };
@@ -521,6 +833,101 @@ pub struct ResidualCodingContext {
     pub scan_idx: u8,
 }
 
+/// Clause 9 residual-coding options signalled by range/SCC extensions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResidualCodingOptions {
+    /// `transform_skip_context_enabled_flag`.
+    pub transform_skip_context_enabled_flag: bool,
+    /// `extended_precision_processing_flag`.
+    pub extended_precision_processing_flag: bool,
+    /// `persistent_rice_adaptation_enabled_flag`.
+    pub persistent_rice_adaptation_enabled_flag: bool,
+    /// `cabac_bypass_alignment_enabled_flag`.
+    pub cabac_bypass_alignment_enabled_flag: bool,
+    /// Luma bit depth used by limited EGk.
+    pub bit_depth_luma: u8,
+    /// Chroma bit depth used by limited EGk.
+    pub bit_depth_chroma: u8,
+}
+
+impl ResidualCodingOptions {
+    fn from_context(context: ResidualCodingContext) -> Self {
+        Self {
+            transform_skip_context_enabled_flag: context.transform_skip_enabled_flag,
+            extended_precision_processing_flag: false,
+            persistent_rice_adaptation_enabled_flag: false,
+            cabac_bypass_alignment_enabled_flag: false,
+            bit_depth_luma: 8,
+            bit_depth_chroma: 8,
+        }
+    }
+
+    fn from_transform_context(context: TransformTreeContext) -> Self {
+        Self {
+            transform_skip_context_enabled_flag: context.transform_skip_enabled_flag,
+            extended_precision_processing_flag: false,
+            persistent_rice_adaptation_enabled_flag: false,
+            cabac_bypass_alignment_enabled_flag: false,
+            bit_depth_luma: 8,
+            bit_depth_chroma: 8,
+        }
+    }
+}
+
+/// Stateful `StatCoeff[4]` values from Clause 9.3.2.1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResidualRiceState {
+    stat_coeff: [u8; 4],
+}
+
+impl ResidualRiceState {
+    /// Creates the state used at the start of a CTU or independent slice.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { stat_coeff: [0; 4] }
+    }
+
+    /// Returns the four current `StatCoeff` values.
+    #[must_use]
+    pub const fn stat_coeff(&self) -> [u8; 4] {
+        self.stat_coeff
+    }
+
+    /// Replaces the four current `StatCoeff` values after WPP/dependent-slice
+    /// synchronization.
+    pub fn set_stat_coeff(&mut self, stat_coeff: [u8; 4]) {
+        self.stat_coeff = stat_coeff;
+    }
+
+    fn initial_rice_parameter(
+        &self,
+        c_idx: u8,
+        transform_skip_or_bypass: bool,
+        persistent: bool,
+    ) -> u8 {
+        if !persistent {
+            return 0;
+        }
+        let sb_type = 2 * usize::from(c_idx == 0) + usize::from(transform_skip_or_bypass);
+        self.stat_coeff[sb_type] / 4
+    }
+
+    fn update_first_remaining(&mut self, sb_type: usize, value: u64) {
+        let stat = self.stat_coeff[sb_type] / 4;
+        if value >= 3 * (1_u64 << stat) {
+            self.stat_coeff[sb_type] = self.stat_coeff[sb_type].saturating_add(1);
+        } else if 2 * value < (1_u64 << stat) && self.stat_coeff[sb_type] > 0 {
+            self.stat_coeff[sb_type] = self.stat_coeff[sb_type].saturating_sub(1);
+        }
+    }
+}
+
+impl Default for ResidualRiceState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn residual_scan_order(size: usize, scan_idx: u8) -> Result<Vec<(usize, usize)>, SyntaxError> {
     let size = u32::try_from(size)
         .map_err(|_| SyntaxError::InvalidSyntaxValue("residual scan size is too large"))?;
@@ -583,11 +990,91 @@ fn decode_last_coeff_coordinate(
         .map_err(|_| SyntaxError::InvalidSyntaxValue("last coefficient coordinate is too large"))
 }
 
+fn read_last_sig_coeff_prefix(
+    cabac: &mut impl CabacReader,
+    table: CabacContextTable,
+    c_idx: u8,
+    log2_trafo_size: u8,
+) -> Result<u64, SyntaxError> {
+    if !(2..=6).contains(&log2_trafo_size) {
+        return Err(SyntaxError::InvalidSyntaxValue(
+            "last coefficient transform size is out of range",
+        ));
+    }
+    let c_max = (u64::from(log2_trafo_size) << 1) - 1;
+    let (ctx_offset, ctx_shift) = if c_idx == 0 {
+        (
+            3 * (usize::from(log2_trafo_size) - 2) + ((usize::from(log2_trafo_size) - 1) >> 2),
+            (usize::from(log2_trafo_size) + 1) >> 2,
+        )
+    } else {
+        (15, usize::from(log2_trafo_size) - 2)
+    };
+    let mut prefix = 0_u64;
+    while prefix < c_max {
+        let ctx_inc = ctx_offset + (prefix as usize >> ctx_shift);
+        if cabac.read_ae_named(table, ctx_inc)? == 0 {
+            break;
+        }
+        prefix += 1;
+    }
+    Ok(prefix)
+}
+
 /// Parses `residual_coding()` and preserves all CABAC-coded syntax fields.
 pub fn parse_residual_coding(
     cabac: &mut impl CabacReader,
     context: ResidualCodingContext,
 ) -> Result<ResidualCodingSyntax, SyntaxError> {
+    parse_residual_coding_for_component(cabac, context, 0)
+}
+
+/// Parses `residual_coding()` with the component index used by Clause 9
+/// context derivation (`0` luma, `1` Cb, `2` Cr).
+pub fn parse_residual_coding_for_component(
+    cabac: &mut impl CabacReader,
+    context: ResidualCodingContext,
+    c_idx: u8,
+) -> Result<ResidualCodingSyntax, SyntaxError> {
+    parse_residual_coding_for_component_with_options(
+        cabac,
+        context,
+        c_idx,
+        ResidualCodingOptions::from_context(context),
+    )
+}
+
+/// Parses residual coding with the optional range/SCC Clause 9 controls.
+pub fn parse_residual_coding_for_component_with_options(
+    cabac: &mut impl CabacReader,
+    context: ResidualCodingContext,
+    c_idx: u8,
+    options: ResidualCodingOptions,
+) -> Result<ResidualCodingSyntax, SyntaxError> {
+    let mut rice_state = ResidualRiceState::new();
+    parse_residual_coding_for_component_with_options_and_state(
+        cabac,
+        context,
+        c_idx,
+        options,
+        &mut rice_state,
+    )
+}
+
+/// Parses residual coding while preserving `StatCoeff` across transform
+/// blocks in the same slice/CTU state.
+pub fn parse_residual_coding_for_component_with_options_and_state(
+    cabac: &mut impl CabacReader,
+    context: ResidualCodingContext,
+    c_idx: u8,
+    options: ResidualCodingOptions,
+    rice_state: &mut ResidualRiceState,
+) -> Result<ResidualCodingSyntax, SyntaxError> {
+    if c_idx > 2 {
+        return Err(SyntaxError::InvalidSyntaxValue(
+            "residual component index must be 0, 1, or 2",
+        ));
+    }
     if context.log2_trafo_size < 2 {
         return Err(SyntaxError::InvalidSyntaxValue(
             "residual transform size must be at least 4x4",
@@ -597,45 +1084,75 @@ pub fn parse_residual_coding(
         && !context.cu_transquant_bypass_flag
         && context.log2_trafo_size <= context.log2_max_transform_skip_size
     {
-        Some(cabac.read_ae()? != 0)
+        Some(
+            cabac.read_ae_named(
+                CabacContextTable::TransformSkip,
+                if c_idx == 0 { 0 } else { 3 },
+            )? != 0,
+        )
     } else {
         None
     };
     let rdpcm_active = transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag;
     let explicit_rdpcm_flag =
         if !context.cu_pred_mode_intra && context.explicit_rdpcm_enabled_flag && rdpcm_active {
-            Some(cabac.read_ae()? != 0)
+            Some(
+                cabac.read_ae_named(
+                    CabacContextTable::ExplicitRdpcm,
+                    if c_idx == 0 { 0 } else { 2 },
+                )? != 0,
+            )
         } else {
             None
         };
     let explicit_rdpcm_dir_flag = if explicit_rdpcm_flag == Some(true) {
-        Some(cabac.read_ae()? != 0)
+        Some(
+            cabac.read_ae_named(
+                CabacContextTable::ExplicitRdpcmDir,
+                if c_idx == 0 { 0 } else { 2 },
+            )? != 0,
+        )
     } else {
         None
     };
-    let last_sig_coeff_x_prefix = cabac.read_ae()?;
-    let last_sig_coeff_y_prefix = cabac.read_ae()?;
+    let last_sig_coeff_x_prefix = read_last_sig_coeff_prefix(
+        cabac,
+        CabacContextTable::LastSigCoeffXPrefix,
+        c_idx,
+        context.log2_trafo_size,
+    )?;
+    let last_sig_coeff_y_prefix = read_last_sig_coeff_prefix(
+        cabac,
+        CabacContextTable::LastSigCoeffYPrefix,
+        c_idx,
+        context.log2_trafo_size,
+    )?;
     let last_sig_coeff_x_suffix = if last_sig_coeff_x_prefix > 3 {
-        Some(cabac.read_ae()?)
+        Some(cabac.read_fixed_bypass((1_u64 << ((last_sig_coeff_x_prefix >> 1) - 1)) - 1)?)
     } else {
         None
     };
     let last_sig_coeff_y_suffix = if last_sig_coeff_y_prefix > 3 {
-        Some(cabac.read_ae()?)
+        Some(cabac.read_fixed_bypass((1_u64 << ((last_sig_coeff_y_prefix >> 1) - 1)) - 1)?)
     } else {
         None
     };
 
-    let last_x = decode_last_coeff_coordinate(
+    let decoded_last_x = decode_last_coeff_coordinate(
         last_sig_coeff_x_prefix,
         last_sig_coeff_x_suffix,
         context.log2_trafo_size,
     )?;
-    let last_y = decode_last_coeff_coordinate(
+    let decoded_last_y = decode_last_coeff_coordinate(
         last_sig_coeff_y_prefix,
         last_sig_coeff_y_suffix,
         context.log2_trafo_size,
     )?;
+    let (last_x, last_y) = if context.scan_idx == 2 {
+        (decoded_last_y, decoded_last_x)
+    } else {
+        (decoded_last_x, decoded_last_y)
+    };
     let transform_side = 1usize
         .checked_shl(u32::from(context.log2_trafo_size))
         .ok_or(SyntaxError::InvalidSyntaxValue("transform size overflows"))?;
@@ -663,17 +1180,34 @@ pub fn parse_residual_coding(
             "transform side must be at least 4",
         ));
     }
+    let mut coded_sub_block_grid = vec![vec![false; sub_block_side]; sub_block_side];
     let mut coded_sub_block_flags = Vec::with_capacity(last_sub_block + 1);
     for index in (0..=last_sub_block).rev() {
+        let (x_s, y_s) = sub_block_scan_order[index];
+        let mut csbf_ctx = 0_usize;
+        if x_s + 1 < sub_block_side {
+            csbf_ctx += usize::from(coded_sub_block_grid[y_s][x_s + 1]);
+        }
+        if y_s + 1 < sub_block_side {
+            csbf_ctx += usize::from(coded_sub_block_grid[y_s + 1][x_s]);
+        }
         let coded = if index > 0 && index < last_sub_block {
-            cabac.read_ae()? != 0
+            cabac.read_ae_named(
+                CabacContextTable::CodedSubBlock,
+                if c_idx == 0 {
+                    csbf_ctx.min(1)
+                } else {
+                    2 + csbf_ctx.min(1)
+                },
+            )? != 0
         } else {
             true
         };
+        coded_sub_block_grid[y_s][x_s] = coded;
         coded_sub_block_flags.push(coded);
     }
 
-    let mut sig_coeff_flags = Vec::with_capacity(coded_sub_block_flags.len() * 16);
+    let mut block_sig_coeff_flags = Vec::with_capacity(coded_sub_block_flags.len());
     for (block_index, coded) in coded_sub_block_flags.iter().copied().enumerate() {
         let sub_block_index = last_sub_block - block_index;
         let mut block_flags = vec![false; 16];
@@ -692,94 +1226,303 @@ pub fn parse_residual_coding(
             if is_last_sub_block && coefficient == last_scan_pos {
                 continue;
             }
+            let (x_c, y_c) = coefficient_scan_order[coefficient];
+            let x_s = x_c >> 2;
+            let y_s = y_c >> 2;
+            let sig_ctx = if options.transform_skip_context_enabled_flag
+                && (transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag)
+            {
+                if c_idx == 0 {
+                    42
+                } else {
+                    16
+                }
+            } else if context.log2_trafo_size == 2 {
+                let base = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8][y_c * 4 + x_c];
+                if c_idx == 0 {
+                    base
+                } else {
+                    27 + base
+                }
+            } else if x_c + y_c == 0 {
+                0
+            } else {
+                let mut prev_csbf = 0_usize;
+                if x_s + 1 < sub_block_side {
+                    prev_csbf += usize::from(coded_sub_block_grid[y_s][x_s + 1]);
+                }
+                if y_s + 1 < sub_block_side {
+                    prev_csbf += usize::from(coded_sub_block_grid[y_s + 1][x_s]) << 1;
+                }
+                let x_p = x_c & 3;
+                let y_p = y_c & 3;
+                let mut sig_ctx = match prev_csbf {
+                    0 => usize::from(x_p + y_p < 3) + usize::from(x_p + y_p == 0),
+                    1 => usize::from(y_p == 1) + usize::from(y_p == 0),
+                    2 => usize::from(x_p == 1) + usize::from(x_p == 0),
+                    _ => 2,
+                };
+                if c_idx == 0 {
+                    if x_s + y_s > 0 {
+                        sig_ctx += 3;
+                    }
+                    sig_ctx += if context.log2_trafo_size == 3 {
+                        if context.scan_idx == 0 {
+                            9
+                        } else {
+                            15
+                        }
+                    } else {
+                        21
+                    };
+                    sig_ctx
+                } else {
+                    sig_ctx += if context.log2_trafo_size == 3 { 9 } else { 12 };
+                    27 + sig_ctx
+                }
+            };
             let significant = if !coded {
                 false
             } else if coefficient > 0 || !infer_dc {
-                cabac.read_ae()? != 0
+                cabac.read_ae_named(CabacContextTable::SigCoeff, sig_ctx)? != 0
             } else {
-                false
+                true
             };
             block_flags[coefficient] = significant;
             if significant {
                 infer_dc = false;
             }
         }
-        sig_coeff_flags.extend(block_flags);
+        block_sig_coeff_flags.push(block_flags);
+    }
+    let mut sig_coeff_flags = Vec::with_capacity(coded_sub_block_flags.len() * 16);
+    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
+        let first_scan_pos = if last_sub_block - block_index == last_sub_block {
+            last_scan_pos
+        } else {
+            15
+        };
+        for coefficient in (0..=first_scan_pos).rev() {
+            sig_coeff_flags.push(block_flags[coefficient]);
+        }
     }
     let significant_count = sig_coeff_flags.iter().filter(|flag| **flag).count();
     let mut coeff_abs_level_greater1_flags = Vec::with_capacity(significant_count.min(8));
+    let mut greater1_context_sets = Vec::with_capacity(significant_count.min(8));
     let mut significant_seen = 0usize;
-    for significant in &sig_coeff_flags {
-        if *significant {
-            if significant_seen < 8 {
-                coeff_abs_level_greater1_flags.push(cabac.read_ae()? != 0);
+    let mut ctx_set = 0_usize;
+    let mut greater1_ctx = 0_usize;
+    let mut last_greater1_flag = false;
+    let mut first_sub_block = true;
+    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
+        let sub_block_index = last_sub_block - block_index;
+        let mut first_in_sub_block = true;
+        let first_scan_pos = if sub_block_index == last_sub_block {
+            last_scan_pos
+        } else {
+            15
+        };
+        for coefficient in (0..=first_scan_pos).rev() {
+            let significant = block_flags[coefficient];
+            if significant {
+                if first_in_sub_block {
+                    ctx_set = if sub_block_index == 0 || c_idx > 0 {
+                        0
+                    } else {
+                        2
+                    };
+                    if !first_sub_block {
+                        if greater1_ctx > 0 {
+                            greater1_ctx = if last_greater1_flag {
+                                0
+                            } else {
+                                greater1_ctx + 1
+                            };
+                        }
+                        if greater1_ctx == 0 {
+                            ctx_set += 1;
+                        }
+                    }
+                    greater1_ctx = 1;
+                    first_in_sub_block = false;
+                    first_sub_block = false;
+                } else if greater1_ctx > 0 {
+                    greater1_ctx = if last_greater1_flag {
+                        0
+                    } else {
+                        greater1_ctx + 1
+                    };
+                }
+                if significant_seen < 8 {
+                    let mut ctx_inc = (ctx_set * 4) + greater1_ctx.min(3);
+                    if c_idx > 0 {
+                        ctx_inc += 16;
+                    }
+                    greater1_context_sets.push(ctx_set);
+                    coeff_abs_level_greater1_flags.push(
+                        cabac.read_ae_named(CabacContextTable::CoeffAbsLevelGreater1, ctx_inc)?
+                            != 0,
+                    );
+                    last_greater1_flag = *coeff_abs_level_greater1_flags.last().ok_or(
+                        SyntaxError::InvalidSyntaxValue("greater1 context state is empty"),
+                    )?;
+                }
+                significant_seen += 1;
             }
-            significant_seen += 1;
         }
     }
     let last_greater1 = coeff_abs_level_greater1_flags.iter().position(|flag| *flag);
     let coeff_abs_level_greater2_flag = if last_greater1.is_some() {
-        Some(cabac.read_ae()? != 0)
+        let ctx_set = last_greater1
+            .and_then(|index| greater1_context_sets.get(index).copied())
+            .unwrap_or(0);
+        Some(
+            cabac.read_ae_named(
+                CabacContextTable::CoeffAbsLevelGreater2,
+                ctx_set + if c_idx > 0 { 4 } else { 0 },
+            )? != 0,
+        )
     } else {
         None
     };
-    let sign_hidden = context.sign_data_hiding_enabled_flag
-        && significant_count > 1
-        && significant_count.saturating_sub(1) > 3
-        && !context.cu_transquant_bypass_flag;
+    if options.cabac_bypass_alignment_enabled_flag {
+        cabac.cabac_bypass_alignment()?;
+    }
+    let implicit_rdpcm_sign_hiding_disabled = context.cu_pred_mode_intra
+        && context.implicit_rdpcm_enabled_flag
+        && transform_skip_flag == Some(true)
+        && (context.intra_luma_pred_mode == 10 || context.intra_luma_pred_mode == 26);
+    let sign_hiding_allowed = context.sign_data_hiding_enabled_flag
+        && !context.cu_transquant_bypass_flag
+        && !implicit_rdpcm_sign_hiding_disabled
+        && explicit_rdpcm_flag != Some(true);
+    let sign_hidden_by_block: Vec<Option<usize>> = block_sig_coeff_flags
+        .iter()
+        .enumerate()
+        .map(|(block_index, block_flags)| {
+            let sub_block_index = last_sub_block - block_index;
+            let first_scan_pos = if sub_block_index == last_sub_block {
+                last_scan_pos
+            } else {
+                15
+            };
+            let significant_positions: Vec<usize> = (0..=first_scan_pos)
+                .filter(|&position| block_flags[position])
+                .collect();
+            match (significant_positions.first(), significant_positions.last()) {
+                (Some(&first), Some(&last))
+                    if sign_hiding_allowed && last.saturating_sub(first) > 3 =>
+                {
+                    Some(first)
+                }
+                _ => None,
+            }
+        })
+        .collect();
     let mut coeff_sign_flags = Vec::with_capacity(significant_count);
-    for (index, significant) in sig_coeff_flags.iter().enumerate() {
-        if *significant && !(sign_hidden && index == significant_count - 1) {
-            coeff_sign_flags.push(cabac.read_ae()? != 0);
+    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
+        let sub_block_index = last_sub_block - block_index;
+        let first_scan_pos = if sub_block_index == last_sub_block {
+            last_scan_pos
+        } else {
+            15
+        };
+        for coefficient in (0..=first_scan_pos).rev() {
+            if block_flags[coefficient] && sign_hidden_by_block[block_index] != Some(coefficient) {
+                coeff_sign_flags.push(cabac.read_bypass_bin()? != 0);
+            }
         }
     }
     let mut coeff_abs_level_remaining = Vec::new();
     let mut coefficients = Vec::with_capacity(significant_count);
     let mut greater1_index = 0usize;
     let mut sign_index = 0usize;
-    let mut sum_abs_level = 0i64;
-    for (scan_index, significant) in sig_coeff_flags.iter().enumerate() {
-        if !*significant {
-            continue;
-        }
-        let greater1 = coeff_abs_level_greater1_flags
-            .get(greater1_index)
-            .copied()
-            .unwrap_or(true);
-        let greater2 = if Some(greater1_index) == last_greater1 {
-            coeff_abs_level_greater2_flag.unwrap_or(false)
+    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
+        let sub_block_index = last_sub_block - block_index;
+        let first_scan_pos = if sub_block_index == last_sub_block {
+            last_scan_pos
         } else {
-            false
+            15
         };
-        let base_level = 1 + u64::from(greater1) + u64::from(greater2);
-        let threshold = if greater1_index < 8 {
-            if Some(greater1_index) == last_greater1 {
-                3
-            } else {
-                2
+        let transform_skip_or_bypass =
+            transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag;
+        let sb_type = 2 * usize::from(c_idx == 0) + usize::from(transform_skip_or_bypass);
+        let mut rice_parameter = rice_state.initial_rice_parameter(
+            c_idx,
+            transform_skip_or_bypass,
+            options.persistent_rice_adaptation_enabled_flag,
+        );
+        let rice_parameter_max = if options.persistent_rice_adaptation_enabled_flag {
+            8
+        } else {
+            4
+        };
+        let mut first_remaining = true;
+        let mut sum_abs_level = 0i64;
+        for coefficient in (0..=first_scan_pos).rev() {
+            if !block_flags[coefficient] {
+                continue;
             }
-        } else {
-            1
-        };
-        let remaining = if base_level == threshold {
-            let value = cabac.read_ae()?;
-            coeff_abs_level_remaining.push(value);
-            value
-        } else {
-            0
-        };
-        let magnitude = i64::try_from(remaining + base_level)
-            .map_err(|_| SyntaxError::InvalidSyntaxValue("coefficient magnitude is too large"))?;
-        sum_abs_level += magnitude;
-        let sign = if sign_hidden && scan_index == significant_count - 1 {
-            sum_abs_level % 2 != 0
-        } else {
-            let value = coeff_sign_flags.get(sign_index).copied().unwrap_or(false);
-            sign_index += 1;
-            value
-        };
-        coefficients.push(if sign { -magnitude } else { magnitude });
-        greater1_index += 1;
+            let greater1 = coeff_abs_level_greater1_flags
+                .get(greater1_index)
+                .copied()
+                .unwrap_or(false);
+            let greater2 = if Some(greater1_index) == last_greater1 {
+                coeff_abs_level_greater2_flag.unwrap_or(false)
+            } else {
+                false
+            };
+            let base_level = 1 + u64::from(greater1) + u64::from(greater2);
+            let threshold = if greater1_index < 8 {
+                if Some(greater1_index) == last_greater1 {
+                    3
+                } else {
+                    2
+                }
+            } else {
+                1
+            };
+            let remaining = if base_level == threshold {
+                let derived_rice = rice_parameter.min(rice_parameter_max);
+                let value = cabac.read_coeff_abs_level_remaining_with_options(
+                    base_level,
+                    derived_rice,
+                    options.extended_precision_processing_flag,
+                    if c_idx == 0 {
+                        options.bit_depth_luma.saturating_add(6).max(15)
+                    } else {
+                        options.bit_depth_chroma.saturating_add(6).max(15)
+                    },
+                )?;
+                coeff_abs_level_remaining.push(value);
+                if options.persistent_rice_adaptation_enabled_flag && first_remaining {
+                    rice_state.update_first_remaining(sb_type, value);
+                    first_remaining = false;
+                }
+                let current_abs_level = base_level
+                    .checked_add(value)
+                    .ok_or(SyntaxError::ExpGolombOverflow)?;
+                if current_abs_level > 3 * (1_u64 << derived_rice) {
+                    rice_parameter = rice_parameter.saturating_add(1).min(rice_parameter_max);
+                }
+                value
+            } else {
+                0
+            };
+            let magnitude = i64::try_from(remaining + base_level).map_err(|_| {
+                SyntaxError::InvalidSyntaxValue("coefficient magnitude is too large")
+            })?;
+            sum_abs_level += magnitude;
+            let sign = if sign_hidden_by_block[block_index] == Some(coefficient) {
+                sum_abs_level % 2 != 0
+            } else {
+                let value = coeff_sign_flags.get(sign_index).copied().unwrap_or(false);
+                sign_index += 1;
+                value
+            };
+            coefficients.push(if sign { -magnitude } else { magnitude });
+            greater1_index += 1;
+        }
     }
     Ok(ResidualCodingSyntax {
         transform_skip_flag,
@@ -824,11 +1567,13 @@ fn parse_transform_unit(
     cbf_cr: &[Option<bool>; 2],
     delta_qp: &mut DeltaQpState,
     chroma_qp_offset: &mut ChromaQpOffsetState,
+    residual_options: ResidualCodingOptions,
+    rice_state: &mut ResidualRiceState,
 ) -> Result<TransformUnitSyntax, SyntaxError> {
     let has_chroma =
         cbf_cb.iter().flatten().any(|flag| *flag) || cbf_cr.iter().flatten().any(|flag| *flag);
     let residual_act_flag = if context.residual_adaptive_colour_transform_enabled_flag {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::TuResidualAct, 0)? != 0)
     } else {
         None
     };
@@ -838,7 +1583,13 @@ fn parse_transform_unit(
     }
     let residual_context = residual_context(context, log2_trafo_size);
     let luma = if cbf_luma {
-        Some(parse_residual_coding(cabac, residual_context)?)
+        Some(parse_residual_coding_for_component_with_options_and_state(
+            cabac,
+            residual_context,
+            0,
+            residual_options,
+            rice_state,
+        )?)
     } else {
         None
     };
@@ -850,7 +1601,13 @@ fn parse_transform_unit(
     }
     for flag in cbf_cb.iter().flatten() {
         if *flag {
-            cb.push(parse_residual_coding(cabac, residual_context)?);
+            cb.push(parse_residual_coding_for_component_with_options_and_state(
+                cabac,
+                residual_context,
+                1,
+                residual_options,
+                rice_state,
+            )?);
         }
     }
     if context.cross_component_prediction_enabled_flag && cbf_luma && has_chroma {
@@ -858,7 +1615,13 @@ fn parse_transform_unit(
     }
     for flag in cbf_cr.iter().flatten() {
         if *flag {
-            cr.push(parse_residual_coding(cabac, residual_context)?);
+            cr.push(parse_residual_coding_for_component_with_options_and_state(
+                cabac,
+                residual_context,
+                2,
+                residual_options,
+                rice_state,
+            )?);
         }
     }
     Ok(TransformUnitSyntax {
@@ -887,13 +1650,16 @@ fn parse_transform_tree_node(
     base_cbf_cr: bool,
     delta_qp: &mut DeltaQpState,
     chroma_qp_offset: &mut ChromaQpOffsetState,
+    residual_options: ResidualCodingOptions,
+    rice_state: &mut ResidualRiceState,
 ) -> Result<TransformTreeNode, SyntaxError> {
     let split_allowed = log2_trafo_size <= context.max_tb_log2_size
         && log2_trafo_size > context.min_tb_log2_size
         && trafo_depth < context.max_trafo_depth
         && !(context.intra_split_flag && trafo_depth == 0);
     let split_transform_flag = if split_allowed {
-        cabac.read_ae()? != 0
+        let ctx_inc = usize::from(5_u8.saturating_sub(log2_trafo_size));
+        cabac.read_ae_named(CabacContextTable::SplitTransform, ctx_inc)? != 0
     } else {
         false
     };
@@ -902,15 +1668,21 @@ fn parse_transform_tree_node(
     let mut cbf_cb = [None; 2];
     let mut cbf_cr = [None; 2];
     if has_chroma_cbf && (trafo_depth == 0 || base_cbf_cb) {
-        cbf_cb[0] = Some(cabac.read_ae()? != 0);
+        cbf_cb[0] =
+            Some(cabac.read_ae_named(CabacContextTable::CbfChroma, trafo_depth as usize)? != 0);
         if context.chroma_array_type == 2 && (!split_transform_flag || log2_trafo_size == 3) {
-            cbf_cb[1] = Some(cabac.read_ae()? != 0);
+            cbf_cb[1] = Some(
+                cabac.read_ae_named(CabacContextTable::CbfChroma, 12 + trafo_depth as usize)? != 0,
+            );
         }
     }
     if has_chroma_cbf && (trafo_depth == 0 || base_cbf_cr) {
-        cbf_cr[0] = Some(cabac.read_ae()? != 0);
+        cbf_cr[0] =
+            Some(cabac.read_ae_named(CabacContextTable::CbfChroma, trafo_depth as usize)? != 0);
         if context.chroma_array_type == 2 && (!split_transform_flag || log2_trafo_size == 3) {
-            cbf_cr[1] = Some(cabac.read_ae()? != 0);
+            cbf_cr[1] = Some(
+                cabac.read_ae_named(CabacContextTable::CbfChroma, 12 + trafo_depth as usize)? != 0,
+            );
         }
     }
     let mut children = Vec::new();
@@ -920,7 +1692,7 @@ fn parse_transform_tree_node(
     let cbf_luma = if split_transform_flag {
         None
     } else if context.cu_pred_mode_intra || trafo_depth != 0 || cbf_chroma {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::CbfLuma, usize::from(trafo_depth != 0))? != 0)
     } else {
         None
     };
@@ -956,6 +1728,8 @@ fn parse_transform_tree_node(
                 cbf_cr[0].unwrap_or(false),
                 delta_qp,
                 chroma_qp_offset,
+                residual_options,
+                rice_state,
             )?);
         }
     } else if cbf_luma == Some(true) || cbf_chroma {
@@ -968,6 +1742,8 @@ fn parse_transform_tree_node(
             &cbf_cr,
             delta_qp,
             chroma_qp_offset,
+            residual_options,
+            rice_state,
         )?);
     }
     Ok(TransformTreeNode {
@@ -995,6 +1771,49 @@ pub fn parse_transform_tree(
     y: u64,
     log2_trafo_size: u8,
 ) -> Result<TransformTreeNode, SyntaxError> {
+    parse_transform_tree_with_residual_options(
+        cabac,
+        context,
+        x,
+        y,
+        log2_trafo_size,
+        ResidualCodingOptions::from_transform_context(context),
+    )
+}
+
+/// Parses `transform_tree()` with the optional Clause 9 range/SCC residual
+/// controls and a Rice state shared by all transform units in the tree.
+pub fn parse_transform_tree_with_residual_options(
+    cabac: &mut impl CabacReader,
+    context: TransformTreeContext,
+    x: u64,
+    y: u64,
+    log2_trafo_size: u8,
+    residual_options: ResidualCodingOptions,
+) -> Result<TransformTreeNode, SyntaxError> {
+    let mut rice_state = ResidualRiceState::new();
+    parse_transform_tree_with_residual_options_and_state(
+        cabac,
+        context,
+        x,
+        y,
+        log2_trafo_size,
+        residual_options,
+        &mut rice_state,
+    )
+}
+
+/// Parses `transform_tree()` while preserving the supplied Clause 9
+/// `StatCoeff` state across transform trees in one slice or CTU sequence.
+pub fn parse_transform_tree_with_residual_options_and_state(
+    cabac: &mut impl CabacReader,
+    context: TransformTreeContext,
+    x: u64,
+    y: u64,
+    log2_trafo_size: u8,
+    residual_options: ResidualCodingOptions,
+    rice_state: &mut ResidualRiceState,
+) -> Result<TransformTreeNode, SyntaxError> {
     let mut delta_qp = DeltaQpState::new();
     let mut chroma_qp_offset = ChromaQpOffsetState::new();
     parse_transform_tree_node(
@@ -1011,6 +1830,8 @@ pub fn parse_transform_tree(
         false,
         &mut delta_qp,
         &mut chroma_qp_offset,
+        residual_options,
+        rice_state,
     )
 }
 
@@ -1092,6 +1913,16 @@ pub fn parse_palette_coding(
     cabac: &mut impl CabacReader,
     context: PaletteCodingContext,
 ) -> Result<PaletteCodingSyntax, SyntaxError> {
+    parse_palette_coding_with_bit_depth(cabac, context, 8, 8)
+}
+
+/// Parses `palette_coding()` with explicit luma and chroma bit depths.
+pub fn parse_palette_coding_with_bit_depth(
+    cabac: &mut impl CabacReader,
+    context: PaletteCodingContext,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+) -> Result<PaletteCodingSyntax, SyntaxError> {
     if context.n_cb_s == 0 {
         return Err(SyntaxError::InvalidSyntaxValue(
             "palette coding block size must be non-zero",
@@ -1109,7 +1940,7 @@ pub fn parse_palette_coding(
         && !prediction_finished
         && num_predicted_palette_entries < palette_max_size
     {
-        let predictor_run = cabac.read_ae()?;
+        let predictor_run = cabac.read_exp_golomb(0)?;
         if predictor_run == 1 {
             prediction_finished = true;
         } else {
@@ -1134,7 +1965,10 @@ pub fn parse_palette_coding(
         }
     }
     let num_signalled_palette_entries = if num_predicted_palette_entries < palette_max_size {
-        checked_usize(cabac.read_ae()?, "too many signalled palette entries")?
+        checked_usize(
+            cabac.read_exp_golomb(0)?,
+            "too many signalled palette entries",
+        )?
     } else {
         0
     };
@@ -1149,9 +1983,14 @@ pub fn parse_palette_coding(
     let component_count = if context.chroma_array_type == 0 { 1 } else { 3 };
     let mut new_palette_entries =
         vec![Vec::with_capacity(num_signalled_palette_entries); component_count];
-    for entries in &mut new_palette_entries {
+    for (component, entries) in new_palette_entries.iter_mut().enumerate() {
+        let bit_depth = if component == 0 {
+            bit_depth_luma
+        } else {
+            bit_depth_chroma
+        };
         for _ in 0..num_signalled_palette_entries {
-            entries.push(cabac.read_ae()?);
+            entries.push(cabac.read_palette_value(bit_depth, context.cu_transquant_bypass_flag)?);
         }
     }
     let current_palette_size = num_predicted_palette_entries
@@ -1160,7 +1999,7 @@ pub fn parse_palette_coding(
             "current palette size overflows",
         ))?;
     let palette_escape_val_present_flag = if current_palette_size != 0 {
-        cabac.read_ae()? != 0
+        cabac.read_bypass_bin()? != 0
     } else {
         false
     };
@@ -1171,7 +2010,10 @@ pub fn parse_palette_coding(
         palette_transpose_flag,
     ) =
         if current_palette_size > 0 {
-            let count_minus1 = checked_usize(cabac.read_ae()?, "palette index count is too large")?;
+            let count_minus1 = checked_usize(
+                cabac.read_palette_num_indices(current_palette_size as u64)?,
+                "palette index count is too large",
+            )?;
             let sample_count = context.n_cb_s.checked_mul(context.n_cb_s).ok_or(
                 SyntaxError::InvalidSyntaxValue("palette sample count overflows"),
             )?;
@@ -1184,7 +2026,10 @@ pub fn parse_palette_coding(
             let mut adjust = 0usize;
             for _ in 0..=count_minus1 {
                 if current_palette_size > adjust {
-                    let index = cabac.read_ae()?;
+                    let index = cabac.read_palette_index(
+                        current_palette_size as u64 - u64::from(adjust != 0),
+                        adjust == 0,
+                    )?;
                     if index > current_palette_size as u64 {
                         return Err(SyntaxError::InvalidSyntaxValue(
                             "palette index exceeds current palette",
@@ -1194,8 +2039,8 @@ pub fn parse_palette_coding(
                 }
                 adjust = 1;
             }
-            let copy_final = cabac.read_ae()? != 0;
-            let transpose = cabac.read_ae()? != 0;
+            let copy_final = cabac.read_ae_named(CabacContextTable::PaletteCopyAbove, 0)? != 0;
+            let transpose = cabac.read_ae_named(CabacContextTable::PaletteTranspose, 0)? != 0;
             (Some(count_minus1), indices, copy_final, transpose)
         } else {
             (None, Vec::new(), false, false)
@@ -1232,7 +2077,7 @@ pub fn parse_palette_coding(
                 .is_none_or(|run: &PaletteRunSyntax| !run.copy_above_indices_flag)
         {
             if remaining_indices > 0 && scan_position < sample_count - 1 {
-                cabac.read_ae()? != 0
+                cabac.read_ae_named(CabacContextTable::PaletteCopyAbove, 0)? != 0
             } else {
                 remaining_indices == 0
             }
@@ -1262,18 +2107,32 @@ pub fn parse_palette_coding(
         } else if max_run_minus1 == 0 {
             (None, None, 1)
         } else {
-            let prefix = cabac.read_ae()?;
+            let prefix = cabac.read_palette_run_prefix(
+                max_run_minus1 as u64,
+                palette_index.unwrap_or(0),
+                copy_above_indices_flag,
+            )?;
             let suffix = if prefix > 1 {
-                let boundary = 1u64.checked_shl((prefix - 1) as u32).unwrap_or(u64::MAX);
+                let boundary = 1_u64.checked_shl((prefix - 1) as u32).unwrap_or(u64::MAX);
                 if u64::try_from(max_run_minus1).unwrap_or(u64::MAX) != boundary {
-                    Some(cabac.read_ae()?)
+                    Some(cabac.read_palette_run_suffix(max_run_minus1 as u64, prefix)?)
                 } else {
                     None
                 }
             } else {
                 None
             };
-            let length = checked_usize(prefix.saturating_add(1), "palette run is too large")?
+            let run_minus1 = if prefix < 2 {
+                prefix
+            } else {
+                1_u64
+                    .checked_shl((prefix - 1) as u32)
+                    .ok_or(SyntaxError::InvalidSyntaxValue(
+                        "palette run prefix is too large",
+                    ))?
+                    .saturating_add(suffix.unwrap_or(0))
+            };
+            let length = checked_usize(run_minus1.saturating_add(1), "palette run is too large")?
                 .min(max_run_minus1.saturating_add(1));
             (Some(prefix), suffix, length.max(1))
         };
@@ -1299,9 +2158,15 @@ pub fn parse_palette_coding(
             .filter(|run| run.palette_index == Some(current_palette_size as u64))
             .map(|run| run.run_length)
             .sum::<usize>();
-        for values in &mut escape_values {
+        for (component, values) in escape_values.iter_mut().enumerate() {
+            let bit_depth = if component == 0 {
+                bit_depth_luma
+            } else {
+                bit_depth_chroma
+            };
             for _ in 0..escape_samples {
-                values.push(cabac.read_ae()?);
+                values
+                    .push(cabac.read_palette_value(bit_depth, context.cu_transquant_bypass_flag)?);
             }
         }
     }
@@ -1328,12 +2193,31 @@ pub fn parse_prediction_unit(
     context: PredictionUnitContext,
     cu_skip_flag: bool,
 ) -> Result<PredictionUnitSyntax, SyntaxError> {
+    parse_prediction_unit_with_dimensions(cabac, context, cu_skip_flag, 0, 0, 0)
+}
+
+/// Parses one `prediction_unit()` with the dimensions required by the
+/// Clause 9.3.3.9 `inter_pred_idc` binarization and its context derivation.
+pub fn parse_prediction_unit_with_dimensions(
+    cabac: &mut impl CabacReader,
+    context: PredictionUnitContext,
+    cu_skip_flag: bool,
+    n_pb_w: u64,
+    n_pb_h: u64,
+    ct_depth: usize,
+) -> Result<PredictionUnitSyntax, SyntaxError> {
     let max_num_merge_cand = context.five_minus_max_num_merge_cand.checked_add(5).ok_or(
         SyntaxError::InvalidSyntaxValue("merge-candidate count overflows"),
     )?;
     if cu_skip_flag {
         let merge_idx = if max_num_merge_cand > 1 {
-            Some(cabac.read_ae()?)
+            Some(cabac.read_truncated_rice_context(
+                CabacContextTable::MergeIdx,
+                0,
+                1,
+                max_num_merge_cand - 1,
+                0,
+            )?)
         } else {
             None
         };
@@ -1349,10 +2233,16 @@ pub fn parse_prediction_unit(
             mvp_l1_flag: None,
         });
     }
-    let merge_flag = cabac.read_ae()? != 0;
+    let merge_flag = cabac.read_ae_named(CabacContextTable::Merge, 0)? != 0;
     if merge_flag {
         let merge_idx = if max_num_merge_cand > 1 {
-            Some(cabac.read_ae()?)
+            Some(cabac.read_truncated_rice_context(
+                CabacContextTable::MergeIdx,
+                0,
+                1,
+                max_num_merge_cand - 1,
+                0,
+            )?)
         } else {
             None
         };
@@ -1369,14 +2259,20 @@ pub fn parse_prediction_unit(
         });
     }
     let inter_pred_idc = if context.slice_type == 0 {
-        Some(cabac.read_ae()?)
+        Some(cabac.read_inter_pred_idc(n_pb_w, n_pb_h, ct_depth)?)
     } else {
         None
     };
     let uses_l0 = inter_pred_idc != Some(1);
     let uses_l1 = inter_pred_idc == Some(1) || inter_pred_idc == Some(2);
     let ref_idx_l0 = if uses_l0 && context.num_ref_idx_l0_active_minus1 > 0 {
-        Some(cabac.read_ae()?)
+        Some(cabac.read_truncated_rice_context(
+            CabacContextTable::RefIdx,
+            0,
+            2,
+            context.num_ref_idx_l0_active_minus1,
+            0,
+        )?)
     } else {
         None
     };
@@ -1386,12 +2282,18 @@ pub fn parse_prediction_unit(
         None
     };
     let mvp_l0_flag = if uses_l0 {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::MvpFlag, 0)? != 0)
     } else {
         None
     };
     let ref_idx_l1 = if uses_l1 && context.num_ref_idx_l1_active_minus1 > 0 {
-        Some(cabac.read_ae()?)
+        Some(cabac.read_truncated_rice_context(
+            CabacContextTable::RefIdx,
+            0,
+            2,
+            context.num_ref_idx_l1_active_minus1,
+            0,
+        )?)
     } else {
         None
     };
@@ -1401,7 +2303,7 @@ pub fn parse_prediction_unit(
         None
     };
     let mvp_l1_flag = if uses_l1 {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::MvpFlag, 0)? != 0)
     } else {
         None
     };
@@ -1449,7 +2351,7 @@ pub fn parse_coding_quadtree_shape(
         && bottom <= geometry.pic_height_in_luma_samples
         && log2_cb_size > geometry.min_cb_log2_size;
     let split_cu_flag = if split_allowed {
-        cabac.read_ae()? != 0
+        cabac.read_ae_named(CabacContextTable::SplitCu, 0)? != 0
     } else {
         false
     };
@@ -1513,6 +2415,108 @@ pub struct CodingTreeNodeSyntax {
     pub coding_unit: Option<CodingUnitSyntax>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CodedBlockNeighbour {
+    x: u64,
+    y: u64,
+    size: u64,
+    cqt_depth: u32,
+    cu_skip_flag: bool,
+    ctb_addr_in_rs: usize,
+}
+
+#[derive(Default)]
+struct CodingNeighbourState {
+    blocks: Vec<CodedBlockNeighbour>,
+    current_ctb: Option<(u64, u64, u64, usize, bool, bool)>,
+}
+
+impl CodingNeighbourState {
+    fn begin_ctu(
+        &mut self,
+        x: u64,
+        y: u64,
+        size: u64,
+        ctb_addr_in_rs: usize,
+        left_available: bool,
+        up_available: bool,
+    ) {
+        self.current_ctb = Some((x, y, size, ctb_addr_in_rs, left_available, up_available));
+    }
+
+    fn find(&self, x: u64, y: u64, left: bool) -> Option<CodedBlockNeighbour> {
+        let (ctb_x, ctb_y, ctb_size, current_ctb, left_available, up_available) =
+            self.current_ctb?;
+        let target_x = if left { x.checked_sub(1)? } else { x };
+        let target_y = if left { y } else { y.checked_sub(1)? };
+        if left && target_x < ctb_x && !left_available {
+            return None;
+        }
+        if !left && target_y < ctb_y && !up_available {
+            return None;
+        }
+        if target_x >= ctb_x + ctb_size || target_y >= ctb_y + ctb_size {
+            return None;
+        }
+        self.blocks
+            .iter()
+            .rev()
+            .find(|block| {
+                block.x <= target_x
+                    && block.y <= target_y
+                    && target_x < block.x + block.size
+                    && target_y < block.y + block.size
+                    && (block.ctb_addr_in_rs == current_ctb
+                        || (left && target_x < ctb_x)
+                        || (!left && target_y < ctb_y))
+            })
+            .copied()
+    }
+
+    fn record(
+        &mut self,
+        x: u64,
+        y: u64,
+        size: u64,
+        cqt_depth: u32,
+        cu_skip_flag: bool,
+        ctb_addr_in_rs: usize,
+    ) {
+        self.blocks.push(CodedBlockNeighbour {
+            x,
+            y,
+            size,
+            cqt_depth,
+            cu_skip_flag,
+            ctb_addr_in_rs,
+        });
+    }
+}
+
+fn split_context_increment(state: &CodingNeighbourState, x: u64, y: u64, depth: u32) -> usize {
+    usize::from(
+        state
+            .find(x, y, true)
+            .is_some_and(|block| block.cqt_depth > depth),
+    ) + usize::from(
+        state
+            .find(x, y, false)
+            .is_some_and(|block| block.cqt_depth > depth),
+    )
+}
+
+fn skip_context_increment(state: &CodingNeighbourState, x: u64, y: u64) -> usize {
+    usize::from(
+        state
+            .find(x, y, true)
+            .is_some_and(|block| block.cu_skip_flag),
+    ) + usize::from(
+        state
+            .find(x, y, false)
+            .is_some_and(|block| block.cu_skip_flag),
+    )
+}
+
 /// Parses `coding_quadtree()` and `coding_unit()` recursively.
 pub fn parse_coding_quadtree(
     cabac: &mut impl CabacReader,
@@ -1521,7 +2525,41 @@ pub fn parse_coding_quadtree(
     log2_cb_size: u8,
     cqt_depth: u32,
     geometry: CodingQuadtreeGeometry,
+    coding_unit_context: CodingUnitContext,
+) -> Result<CodingTreeNodeSyntax, SyntaxError> {
+    let size = block_size(log2_cb_size)?;
+    let mut state = CodingNeighbourState::default();
+    state.begin_ctu(x, y, size, usize::MAX, false, false);
+    parse_coding_quadtree_inner(
+        cabac,
+        x,
+        y,
+        log2_cb_size,
+        cqt_depth,
+        geometry,
+        coding_unit_context,
+        &mut state,
+        usize::MAX,
+        8,
+        8,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_coding_quadtree_inner(
+    cabac: &mut impl CabacReader,
+    x: u64,
+    y: u64,
+    log2_cb_size: u8,
+    cqt_depth: u32,
+    geometry: CodingQuadtreeGeometry,
     mut coding_unit_context: CodingUnitContext,
+    state: &mut CodingNeighbourState,
+    ctb_addr_in_rs: usize,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
 ) -> Result<CodingTreeNodeSyntax, SyntaxError> {
     let size = block_size(log2_cb_size)?;
     let right = x.checked_add(size).ok_or(SyntaxError::InvalidSyntaxValue(
@@ -1534,7 +2572,10 @@ pub fn parse_coding_quadtree(
         && bottom <= geometry.pic_height_in_luma_samples
         && log2_cb_size > geometry.min_cb_log2_size;
     let split_cu_flag = if split_allowed {
-        cabac.read_ae()? != 0
+        cabac.read_ae_named(
+            CabacContextTable::SplitCu,
+            split_context_increment(state, x, y, cqt_depth),
+        )? != 0
     } else {
         false
     };
@@ -1556,7 +2597,7 @@ pub fn parse_coding_quadtree(
             if child_x < geometry.pic_width_in_luma_samples
                 && child_y < geometry.pic_height_in_luma_samples
             {
-                children.push(parse_coding_quadtree(
+                children.push(parse_coding_quadtree_inner(
                     cabac,
                     child_x,
                     child_y,
@@ -1564,14 +2605,42 @@ pub fn parse_coding_quadtree(
                     cqt_depth + 1,
                     geometry,
                     coding_unit_context,
+                    state,
+                    ctb_addr_in_rs,
+                    bit_depth_luma,
+                    bit_depth_chroma,
+                    amp_enabled,
                 )?);
             }
         }
         None
     } else {
         coding_unit_context.log2_cb_size = log2_cb_size;
-        Some(parse_coding_unit(cabac, coding_unit_context)?)
+        let skip_ctx_inc = if coding_unit_context.slice_type != 2 {
+            skip_context_increment(state, x, y)
+        } else {
+            0
+        };
+        Some(parse_coding_unit_with_skip_context_and_bit_depth(
+            cabac,
+            coding_unit_context,
+            skip_ctx_inc,
+            bit_depth_luma,
+            bit_depth_chroma,
+            cqt_depth,
+            amp_enabled,
+        )?)
     };
+    if let Some(ref coding_unit) = coding_unit {
+        state.record(
+            x,
+            y,
+            size,
+            cqt_depth,
+            coding_unit.cu_skip_flag == Some(true),
+            ctb_addr_in_rs,
+        );
+    }
     Ok(CodingTreeNodeSyntax {
         x,
         y,
@@ -1656,6 +2725,47 @@ pub fn parse_slice_segment_layer_rbsp(
     header_context: &SliceSegmentHeaderContext<'_>,
     data_context: Option<SliceSegmentDataContext<'_>>,
 ) -> Result<SliceSegmentLayerSyntax, SyntaxError> {
+    parse_slice_segment_layer_rbsp_with_bit_depth(
+        reader,
+        cabac,
+        header_context,
+        data_context,
+        10,
+        10,
+    )
+}
+
+/// Parses a slice-segment layer with explicit luma and chroma bit depths.
+pub fn parse_slice_segment_layer_rbsp_with_bit_depth(
+    reader: &mut BitReader<'_>,
+    cabac: &mut impl CabacReader,
+    header_context: &SliceSegmentHeaderContext<'_>,
+    data_context: Option<SliceSegmentDataContext<'_>>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+) -> Result<SliceSegmentLayerSyntax, SyntaxError> {
+    parse_slice_segment_layer_rbsp_with_bit_depth_and_amp(
+        reader,
+        cabac,
+        header_context,
+        data_context,
+        bit_depth_luma,
+        bit_depth_chroma,
+        false,
+    )
+}
+
+/// Parses a slice-segment layer with explicit bit depths and the SPS
+/// `amp_enabled_flag` supplied to coding-unit `part_mode` parsing.
+pub fn parse_slice_segment_layer_rbsp_with_bit_depth_and_amp(
+    reader: &mut BitReader<'_>,
+    cabac: &mut impl CabacReader,
+    header_context: &SliceSegmentHeaderContext<'_>,
+    data_context: Option<SliceSegmentDataContext<'_>>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
+) -> Result<SliceSegmentLayerSyntax, SyntaxError> {
     let header = crate::syntax::parse_slice_segment_header(reader, header_context)?;
     let data = if header.dependent_slice_segment_flag {
         None
@@ -1663,7 +2773,13 @@ pub fn parse_slice_segment_layer_rbsp(
         let context = data_context.ok_or(SyntaxError::InvalidSyntaxValue(
             "independent slice segment requires slice-data context",
         ))?;
-        Some(parse_slice_segment_data(cabac, context)?)
+        Some(parse_slice_segment_data_with_bit_depth_and_amp(
+            cabac,
+            context,
+            bit_depth_luma,
+            bit_depth_chroma,
+            amp_enabled,
+        )?)
     };
     let cabac_zero_word_count = cabac.rbsp_slice_segment_trailing_bits()?;
     Ok(SliceSegmentLayerSyntax {
@@ -1694,9 +2810,38 @@ pub fn parse_slice_segment_data(
     cabac: &mut impl CabacReader,
     context: SliceSegmentDataContext<'_>,
 ) -> Result<SliceSegmentDataSyntax, SyntaxError> {
+    parse_slice_segment_data_with_bit_depth(cabac, context, 10, 10)
+}
+
+/// Parses slice-segment data with explicit luma and chroma bit depths.
+pub fn parse_slice_segment_data_with_bit_depth(
+    cabac: &mut impl CabacReader,
+    context: SliceSegmentDataContext<'_>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+) -> Result<SliceSegmentDataSyntax, SyntaxError> {
+    parse_slice_segment_data_with_bit_depth_and_amp(
+        cabac,
+        context,
+        bit_depth_luma,
+        bit_depth_chroma,
+        false,
+    )
+}
+
+/// Parses slice-segment data with explicit bit depths and the SPS
+/// `amp_enabled_flag` used by all coding units in the segment.
+pub fn parse_slice_segment_data_with_bit_depth_and_amp(
+    cabac: &mut impl CabacReader,
+    context: SliceSegmentDataContext<'_>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
+) -> Result<SliceSegmentDataSyntax, SyntaxError> {
     let mut ctb_addr_in_ts = context.start_ctb_addr_in_ts;
     let mut coding_tree_units = Vec::new();
     let mut subset_boundary_count = 0;
+    let mut neighbour_state = CodingNeighbourState::default();
     loop {
         let ctb_addr_in_rs = map_at(
             context.ctb_addr_in_ts_to_rs,
@@ -1728,27 +2873,60 @@ pub fn parse_slice_segment_data(
             false
         };
         let sao = if context.slice_sao_luma_flag || context.slice_sao_chroma_flag {
-            Some(parse_sao(
+            Some(parse_sao_with_bit_depth(
                 cabac,
                 left_available,
                 up_available,
                 context.slice_sao_luma_flag,
                 context.slice_sao_chroma_flag,
                 context.chroma_array_type_nonzero,
+                bit_depth_luma,
+                bit_depth_chroma,
             )?)
         } else {
             None
         };
-        let coding_tree = parse_coding_quadtree(
+        let ctb_x = (rx as u64) << context.coding_unit.log2_cb_size;
+        let ctb_y = (ry as u64) << context.coding_unit.log2_cb_size;
+        let ctb_size = block_size(context.coding_unit.log2_cb_size)?;
+        neighbour_state.begin_ctu(
+            ctb_x,
+            ctb_y,
+            ctb_size,
+            ctb_addr_in_rs,
+            left_available,
+            up_available,
+        );
+        let coding_tree = parse_coding_quadtree_inner(
             cabac,
-            (rx as u64) << context.coding_unit.log2_cb_size,
-            (ry as u64) << context.coding_unit.log2_cb_size,
+            ctb_x,
+            ctb_y,
             context.coding_unit.log2_cb_size,
             0,
             context.geometry,
             context.coding_unit,
+            &mut neighbour_state,
+            ctb_addr_in_rs,
+            bit_depth_luma,
+            bit_depth_chroma,
+            amp_enabled,
         )?;
-        let end_of_slice_segment_flag = cabac.read_ae()? != 0;
+        let store_wpp_state = context.entropy_coding_sync_enabled_flag
+            && (ctb_addr_in_rs % context.pic_width_in_ctbs == 1
+                || (ctb_addr_in_rs > 1
+                    && tile_at(context.tile_ids, ctb_addr_in_ts)?
+                        != tile_at(
+                            context.tile_ids,
+                            map_at(
+                                context.ctb_addr_rs_to_ts,
+                                ctb_addr_in_rs - 2,
+                                "raster-to-tile mapping is incomplete",
+                            )?,
+                        )?));
+        if store_wpp_state {
+            cabac.store_wpp_contexts();
+        }
+        let end_of_slice_segment_flag = cabac.read_terminate()? != 0;
         coding_tree_units.push(CodingTreeUnitSyntax {
             ctb_addr_in_ts,
             ctb_addr_in_rs,
@@ -1780,12 +2958,38 @@ pub fn parse_slice_segment_data(
                     )?,
                 )? != tile_at(context.tile_ids, ctb_addr_in_ts)?);
         if crosses_tile || crosses_sync {
-            if cabac.read_ae()? != 1 {
+            if cabac.read_terminate()? != 1 {
                 return Err(SyntaxError::InvalidSyntaxValue(
                     "end_of_subset_one_bit must equal one",
                 ));
             }
             cabac.byte_alignment()?;
+            if crosses_tile {
+                cabac.reset_contexts_to_initial();
+            } else if crosses_sync {
+                let next_ry = next_rs / context.pic_width_in_ctbs;
+                let top_available = if next_ry == 0 || next_rs < context.slice_addr_rs {
+                    false
+                } else {
+                    let next_up_rs = next_rs - context.pic_width_in_ctbs;
+                    let next_up_ts = map_at(
+                        context.ctb_addr_rs_to_ts,
+                        next_up_rs,
+                        "raster-to-tile mapping is incomplete",
+                    )?;
+                    next_up_rs >= context.slice_addr_rs
+                        && tile_at(context.tile_ids, next_up_ts)?
+                            == tile_at(context.tile_ids, ctb_addr_in_ts)?
+                };
+                if top_available {
+                    if !cabac.synchronize_wpp_contexts() {
+                        cabac.reset_contexts_to_initial();
+                    }
+                } else {
+                    cabac.reset_contexts_to_initial();
+                }
+            }
+            cabac.initialize_arithmetic_engine()?;
             subset_boundary_count += 1;
         }
     }
@@ -1812,11 +3016,15 @@ pub struct MotionVectorDifferenceSyntax {
 pub fn parse_motion_vector_difference(
     cabac: &mut impl CabacReader,
 ) -> Result<MotionVectorDifferenceSyntax, SyntaxError> {
-    let abs_mvd_greater0_flag = [cabac.read_ae()? != 0, cabac.read_ae()? != 0];
+    let abs_mvd_greater0_flag = [
+        cabac.read_ae_named(CabacContextTable::AbsMvd, 0)? != 0,
+        cabac.read_ae_named(CabacContextTable::AbsMvd, 0)? != 0,
+    ];
     let mut abs_mvd_greater1_flag = [false; 2];
     for component in 0..2 {
         if abs_mvd_greater0_flag[component] {
-            abs_mvd_greater1_flag[component] = cabac.read_ae()? != 0;
+            abs_mvd_greater1_flag[component] =
+                cabac.read_ae_named(CabacContextTable::AbsMvd, 1)? != 0;
         }
     }
     let mut abs_mvd_minus2 = [None; 2];
@@ -1824,9 +3032,9 @@ pub fn parse_motion_vector_difference(
     for component in 0..2 {
         if abs_mvd_greater0_flag[component] {
             if abs_mvd_greater1_flag[component] {
-                abs_mvd_minus2[component] = Some(cabac.read_ae()?);
+                abs_mvd_minus2[component] = Some(cabac.read_exp_golomb(1)?);
             }
-            mvd_sign_flag[component] = Some(cabac.read_ae()? != 0);
+            mvd_sign_flag[component] = Some(cabac.read_bypass_bin()? != 0);
         }
     }
     Ok(MotionVectorDifferenceSyntax {
@@ -1850,9 +3058,10 @@ pub struct CrossComponentPredictionSyntax {
 pub fn parse_cross_component_prediction(
     cabac: &mut impl CabacReader,
 ) -> Result<CrossComponentPredictionSyntax, SyntaxError> {
-    let log2_res_scale_abs_plus1 = cabac.read_ae()?;
+    let log2_res_scale_abs_plus1 =
+        cabac.read_truncated_rice_context(CabacContextTable::Log2ResScaleAbsPlus1, 0, 4, 4, 0)?;
     let res_scale_sign_flag = if log2_res_scale_abs_plus1 != 0 {
-        Some(cabac.read_ae()? != 0)
+        Some(cabac.read_ae_named(CabacContextTable::ResScaleSign, 0)? != 0)
     } else {
         None
     };
@@ -1889,11 +3098,11 @@ impl DeltaQpState {
     ) -> Result<(), SyntaxError> {
         if enabled && !self.coded {
             self.coded = true;
-            let absolute = cabac.read_ae()?;
+            let absolute = cabac.read_cu_qp_delta_abs()?;
             if absolute == 0 {
                 self.value = 0;
             } else {
-                let negative = cabac.read_ae()? != 0;
+                let negative = cabac.read_bypass_bin()? != 0;
                 let absolute = i64::try_from(absolute)
                     .map_err(|_| SyntaxError::InvalidSyntaxValue("CU delta QP is too large"))?;
                 self.value = if negative { -absolute } else { absolute };
@@ -1940,9 +3149,15 @@ impl ChromaQpOffsetState {
     ) -> Result<(), SyntaxError> {
         if cu_chroma_qp_offset_enabled_flag && !self.coded {
             self.coded = true;
-            self.enabled = cabac.read_ae()? != 0;
+            self.enabled = cabac.read_ae_named(CabacContextTable::ChromaQpOffsetFlag, 0)? != 0;
             if self.enabled && chroma_qp_offset_list_len_minus1 > 0 {
-                self.index = Some(cabac.read_ae()?);
+                self.index = Some(cabac.read_truncated_rice_repeated_context(
+                    CabacContextTable::ChromaQpOffsetIdx,
+                    0,
+                    5,
+                    chroma_qp_offset_list_len_minus1,
+                    0,
+                )?);
             }
         }
         Ok(())
@@ -1991,6 +3206,23 @@ pub fn parse_pcm_sample(
     })
 }
 
+/// Parses PCM samples through the active CABAC reader, including the
+/// post-PCM arithmetic-decoder initialization required by Clause 9.
+pub fn parse_pcm_sample_from_cabac(
+    cabac: &mut impl CabacReader,
+    luma_sample_count: usize,
+    chroma_sample_count: usize,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+) -> Result<PcmSampleSyntax, SyntaxError> {
+    cabac.read_pcm_samples(
+        luma_sample_count,
+        chroma_sample_count,
+        bit_depth_luma,
+        bit_depth_chroma,
+    )
+}
+
 /// One parsed SAO component from §7.3.8.3.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaoComponentSyntax {
@@ -2019,22 +3251,29 @@ pub struct SaoSyntax {
     pub chroma: Option<SaoComponentSyntax>,
 }
 
-fn parse_sao_component(cabac: &mut impl CabacReader) -> Result<SaoComponentSyntax, SyntaxError> {
-    let type_idx = cabac.read_ae()?;
+fn parse_sao_component(
+    cabac: &mut impl CabacReader,
+    bit_depth: usize,
+) -> Result<SaoComponentSyntax, SyntaxError> {
+    let type_idx = cabac.read_truncated_rice_context(CabacContextTable::SaoType, 0, 1, 2, 0)?;
     let mut offset_abs = [0; 4];
+    let offset_c_max = (1_u64
+        << u32::try_from(bit_depth.min(10).saturating_sub(5))
+            .map_err(|_| SyntaxError::InvalidSyntaxValue("SAO bit depth is out of range"))?)
+        - 1;
     for value in &mut offset_abs {
-        *value = cabac.read_ae()?;
+        *value = cabac.read_truncated_rice(offset_c_max, 0)?;
     }
     let mut offset_sign = Vec::new();
     let (band_position, eo_class) = if type_idx == 1 {
         for &value in &offset_abs {
             if value != 0 {
-                offset_sign.push(cabac.read_ae()? != 0);
+                offset_sign.push(cabac.read_bypass_bin()? != 0);
             }
         }
-        (Some(cabac.read_ae()?), None)
+        (Some(cabac.read_fixed_bypass(31)?), None)
     } else if type_idx != 0 {
-        (None, Some(cabac.read_ae()?))
+        (None, Some(cabac.read_fixed_bypass(3)?))
     } else {
         (None, None)
     };
@@ -2056,13 +3295,37 @@ pub fn parse_sao(
     slice_sao_chroma_flag: bool,
     chroma_array_type_nonzero: bool,
 ) -> Result<SaoSyntax, SyntaxError> {
+    parse_sao_with_bit_depth(
+        cabac,
+        left_available,
+        up_available,
+        slice_sao_luma_flag,
+        slice_sao_chroma_flag,
+        chroma_array_type_nonzero,
+        10,
+        10,
+    )
+}
+
+/// Parses `sao(rx, ry)` with explicit luma and chroma bit depths.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_sao_with_bit_depth(
+    cabac: &mut impl CabacReader,
+    left_available: bool,
+    up_available: bool,
+    slice_sao_luma_flag: bool,
+    slice_sao_chroma_flag: bool,
+    chroma_array_type_nonzero: bool,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+) -> Result<SaoSyntax, SyntaxError> {
     let merge_left_flag = if left_available {
-        cabac.read_ae()? != 0
+        cabac.read_ae_named(CabacContextTable::SaoMerge, 0)? != 0
     } else {
         false
     };
     let merge_up_flag = if up_available && !merge_left_flag {
-        cabac.read_ae()? != 0
+        cabac.read_ae_named(CabacContextTable::SaoMerge, 0)? != 0
     } else {
         false
     };
@@ -2075,12 +3338,12 @@ pub fn parse_sao(
         });
     }
     let luma = if slice_sao_luma_flag {
-        Some(parse_sao_component(cabac)?)
+        Some(parse_sao_component(cabac, bit_depth_luma)?)
     } else {
         None
     };
     let chroma = if slice_sao_chroma_flag && chroma_array_type_nonzero {
-        Some(parse_sao_component(cabac)?)
+        Some(parse_sao_component(cabac, bit_depth_chroma)?)
     } else {
         None
     };
