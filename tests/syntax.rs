@@ -269,6 +269,8 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     push_bits(&mut bits, 1, 1); // used_by_curr_pic_lt_sps_flag
     push_bits(&mut bits, 1, 1); // sps_temporal_mvp_enabled_flag
     push_bits(&mut bits, 0, 1); // strong_intra_smoothing_enabled_flag
+    push_bits(&mut bits, 0, 1); // vui_parameters_present_flag
+    push_bits(&mut bits, 0, 1); // sps_extension_present_flag
 
     let bytes = finish_bits(&bits);
     let mut reader = BitReader::new(&bytes);
@@ -287,6 +289,9 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     );
     assert!(sps.sps_temporal_mvp_enabled_flag);
     assert!(!sps.strong_intra_smoothing_enabled_flag);
+    assert!(!sps.vui_parameters_present_flag);
+    assert!(sps.vui_parameters.is_none());
+    assert!(!sps.sps_extension_present_flag);
 }
 
 #[test]
@@ -317,4 +322,93 @@ fn inter_predicted_short_term_rps_uses_previous_num_delta_pocs() {
     assert_eq!(second.used_by_curr_pic_flag, vec![true, false]);
     assert_eq!(second.use_delta_flag, vec![false, true]);
     assert_eq!(second.num_delta_pocs, 2);
+}
+
+#[test]
+fn vui_parser_reads_annex_e_parameters_and_hrd() {
+    let mut bits = Vec::new();
+    push_bits(&mut bits, 1, 1); // aspect_ratio_info_present_flag
+    push_bits(&mut bits, 255, 8); // EXTENDED_SAR
+    push_bits(&mut bits, 100, 16); // sar_width
+    push_bits(&mut bits, 200, 16); // sar_height
+    push_bits(&mut bits, 1, 1); // overscan_info_present_flag
+    push_bits(&mut bits, 1, 1); // overscan_appropriate_flag
+    push_bits(&mut bits, 1, 1); // video_signal_type_present_flag
+    push_bits(&mut bits, 5, 3); // video_format
+    push_bits(&mut bits, 1, 1); // video_full_range_flag
+    push_bits(&mut bits, 1, 1); // colour_description_present_flag
+    push_bits(&mut bits, 1, 8); // colour_primaries
+    push_bits(&mut bits, 16, 8); // transfer_characteristics
+    push_bits(&mut bits, 9, 8); // matrix_coeffs
+    push_bits(&mut bits, 1, 1); // chroma_loc_info_present_flag
+    push_ue(&mut bits, 2); // chroma_sample_loc_type_top_field
+    push_ue(&mut bits, 3); // chroma_sample_loc_type_bottom_field
+    push_bits(&mut bits, 1, 1); // neutral_chroma_indication_flag
+    push_bits(&mut bits, 0, 1); // field_seq_flag
+    push_bits(&mut bits, 1, 1); // frame_field_info_present_flag
+    push_bits(&mut bits, 1, 1); // default_display_window_flag
+    push_ue(&mut bits, 1);
+    push_ue(&mut bits, 2);
+    push_ue(&mut bits, 3);
+    push_ue(&mut bits, 4);
+    push_bits(&mut bits, 1, 1); // vui_timing_info_present_flag
+    push_bits(&mut bits, 1000, 32); // vui_num_units_in_tick
+    push_bits(&mut bits, 60_000, 32); // vui_time_scale
+    push_bits(&mut bits, 1, 1); // vui_poc_proportional_to_timing_flag
+    push_ue(&mut bits, 0); // vui_num_ticks_poc_diff_one_minus1
+    push_bits(&mut bits, 1, 1); // vui_hrd_parameters_present_flag
+    push_bits(&mut bits, 1, 1); // nal_hrd_parameters_present_flag
+    push_bits(&mut bits, 0, 1); // vcl_hrd_parameters_present_flag
+    push_bits(&mut bits, 0, 1); // sub_pic_hrd_params_present_flag
+    push_bits(&mut bits, 2, 4); // bit_rate_scale
+    push_bits(&mut bits, 3, 4); // cpb_size_scale
+    push_bits(&mut bits, 5, 5); // initial_cpb_removal_delay_length_minus1
+    push_bits(&mut bits, 4, 5); // au_cpb_removal_delay_length_minus1
+    push_bits(&mut bits, 5, 5); // dpb_output_delay_length_minus1
+    push_bits(&mut bits, 0, 1); // fixed_pic_rate_general_flag
+    push_bits(&mut bits, 1, 1); // fixed_pic_rate_within_cvs_flag
+    push_ue(&mut bits, 2); // elemental_duration_in_tc_minus1
+    push_ue(&mut bits, 0); // cpb_cnt_minus1
+    push_ue(&mut bits, 0); // bit_rate_value_minus1
+    push_ue(&mut bits, 1); // cpb_size_value_minus1
+    push_bits(&mut bits, 1, 1); // cbr_flag
+    push_bits(&mut bits, 1, 1); // bitstream_restriction_flag
+    push_bits(&mut bits, 1, 1); // tiles_fixed_structure_flag
+    push_bits(&mut bits, 1, 1); // motion_vectors_over_pic_boundaries_flag
+    push_bits(&mut bits, 0, 1); // restricted_ref_pic_lists_flag
+    push_ue(&mut bits, 1); // min_spatial_segmentation_idc
+    push_ue(&mut bits, 2); // max_bytes_per_pic_denom
+    push_ue(&mut bits, 3); // max_bits_per_min_cu_denom
+    push_ue(&mut bits, 4); // log2_max_mv_length_horizontal
+    push_ue(&mut bits, 5); // log2_max_mv_length_vertical
+
+    let bytes = finish_bits(&bits);
+    let mut reader = BitReader::new(&bytes);
+    let vui = h265rs::parse_vui_parameters(&mut reader, 0).unwrap();
+    assert_eq!(vui.aspect_ratio_idc, Some(255));
+    assert_eq!(vui.sar_width, Some(100));
+    assert_eq!(vui.sar_height, Some(200));
+    assert_eq!(vui.video_format, Some(5));
+    assert_eq!(vui.chroma_sample_loc_type_bottom_field, Some(3));
+    assert_eq!(vui.default_display_window, Some([1, 2, 3, 4]));
+    let timing = vui.timing_info.as_ref().unwrap();
+    assert_eq!(timing.time_scale, 60_000);
+    let hrd = timing.hrd_parameters.as_ref().unwrap();
+    assert_eq!(hrd.sub_layers.len(), 1);
+    assert_eq!(hrd.sub_layers[0].cpb_cnt_minus1, Some(0));
+    assert_eq!(
+        hrd.sub_layers[0]
+            .nal_hrd_parameters
+            .as_ref()
+            .unwrap()
+            .cpb_entries[0]
+            .cpb_size_value_minus1,
+        1
+    );
+    assert_eq!(
+        vui.bitstream_restriction
+            .unwrap()
+            .log2_max_mv_length_vertical,
+        5
+    );
 }

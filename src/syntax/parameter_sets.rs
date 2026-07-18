@@ -1,6 +1,7 @@
 use super::{
-    parse_profile_tier_level, parse_short_term_reference_picture_set, BitReader, ProfileTierLevel,
-    ScalingListData, ShortTermReferencePictureSet, SyntaxError,
+    parse_profile_tier_level, parse_short_term_reference_picture_set, parse_vui_parameters,
+    BitReader, ProfileTierLevel, ScalingListData, ShortTermReferencePictureSet, SyntaxError,
+    VuiParameters,
 };
 
 /// The parameter-set ordering values repeated for each sub-layer.
@@ -152,7 +153,7 @@ pub struct SequenceParameterSetHeader {
     pub max_transform_hierarchy_depth_intra: u64,
 }
 
-/// SPS tool, scaling-list and short-term-reference syntax following
+/// SPS tool, scaling-list, reference-picture and VUI syntax following
 /// [`SequenceParameterSetHeader`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SequenceParameterSetSyntax {
@@ -184,6 +185,12 @@ pub struct SequenceParameterSetSyntax {
     pub sps_temporal_mvp_enabled_flag: bool,
     /// `strong_intra_smoothing_enabled_flag`.
     pub strong_intra_smoothing_enabled_flag: bool,
+    /// `vui_parameters_present_flag`.
+    pub vui_parameters_present_flag: bool,
+    /// VUI syntax when present.
+    pub vui_parameters: Option<VuiParameters>,
+    /// `sps_extension_present_flag`.
+    pub sps_extension_present_flag: bool,
 }
 
 /// PCM fields from the optional SPS PCM syntax.
@@ -294,8 +301,8 @@ impl SequenceParameterSetHeader {
 
 impl SequenceParameterSetSyntax {
     /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM and
-    /// short- and long-term reference picture-set syntax. The reader stops
-    /// before `vui_parameters_present_flag`.
+    /// short- and long-term reference picture-set syntax, VUI syntax, and the
+    /// SPS extension presence flag. The reader stops before SPS extensions.
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
         let header = SequenceParameterSetHeader::parse(reader)?;
         let scaling_list_enabled_flag = reader.read_u(1)? != 0;
@@ -368,6 +375,16 @@ impl SequenceParameterSetSyntax {
         };
         let sps_temporal_mvp_enabled_flag = reader.read_u(1)? != 0;
         let strong_intra_smoothing_enabled_flag = reader.read_u(1)? != 0;
+        let vui_parameters_present_flag = reader.read_u(1)? != 0;
+        let vui_parameters = if vui_parameters_present_flag {
+            Some(parse_vui_parameters(
+                reader,
+                header.sps_max_sub_layers_minus1,
+            )?)
+        } else {
+            None
+        };
+        let sps_extension_present_flag = reader.read_u(1)? != 0;
         Ok(Self {
             header,
             scaling_list_enabled_flag,
@@ -383,6 +400,9 @@ impl SequenceParameterSetSyntax {
             long_term_ref_pic_set,
             sps_temporal_mvp_enabled_flag,
             strong_intra_smoothing_enabled_flag,
+            vui_parameters_present_flag,
+            vui_parameters,
+            sps_extension_present_flag,
         })
     }
 }
