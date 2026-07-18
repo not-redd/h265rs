@@ -28,6 +28,8 @@ pub enum SyntaxError {
     NalUnitTooShort,
     /// A NAL header contains a forbidden or otherwise invalid value.
     InvalidNalHeader(&'static str),
+    /// A syntax value violates a structural range required by the table.
+    InvalidSyntaxValue(&'static str),
     /// Context-adaptive arithmetic coding is implemented in Clause 9, not here.
     ArithmeticCodingUnsupported,
 }
@@ -51,6 +53,7 @@ impl fmt::Display for SyntaxError {
             Self::InvalidUtf8 => write!(f, "string descriptor contains invalid UTF-8"),
             Self::NalUnitTooShort => write!(f, "NAL unit is shorter than its two-byte header"),
             Self::InvalidNalHeader(message) => write!(f, "invalid NAL header: {message}"),
+            Self::InvalidSyntaxValue(message) => write!(f, "invalid syntax value: {message}"),
             Self::ArithmeticCodingUnsupported => {
                 write!(
                     f,
