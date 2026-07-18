@@ -1,7 +1,7 @@
 use super::{
-    parse_profile_tier_level, parse_short_term_reference_picture_set, parse_vui_parameters,
-    BitReader, ProfileTierLevel, ScalingListData, ShortTermReferencePictureSet, SpsExtensionSyntax,
-    SyntaxError, VuiParameters,
+    parse_hrd_parameters, parse_profile_tier_level, parse_short_term_reference_picture_set,
+    parse_vui_parameters, BitReader, HrdParameters, ProfileTierLevel, ScalingListData,
+    ShortTermReferencePictureSet, SpsExtensionSyntax, SyntaxError, VuiParameters,
 };
 
 /// The parameter-set ordering values repeated for each sub-layer.
@@ -46,6 +46,106 @@ pub struct VideoParameterSetHeader {
     pub layer_id_included_flag: Vec<Vec<bool>>,
     /// `vps_timing_info_present_flag`.
     pub vps_timing_info_present_flag: bool,
+}
+
+/// VPS timing and HRD syntax from the remainder of §7.3.2.1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VpsTimingSyntax {
+    /// `vps_num_units_in_tick`.
+    pub num_units_in_tick: u32,
+    /// `vps_time_scale`.
+    pub time_scale: u32,
+    /// `vps_poc_proportional_to_timing_flag`.
+    pub poc_proportional_to_timing_flag: bool,
+    /// `vps_num_ticks_poc_diff_one_minus1`, when present.
+    pub num_ticks_poc_diff_one_minus1: Option<u64>,
+    /// `vps_num_hrd_parameters`.
+    pub num_hrd_parameters: u64,
+    /// `hrd_layer_set_idx` values.
+    pub hrd_layer_set_idx: Vec<u64>,
+    /// `cprms_present_flag` values, including the inferred first value.
+    pub cprms_present_flag: Vec<bool>,
+    /// HRD syntax structures in VPS order.
+    pub hrd_parameters: Vec<HrdParameters>,
+}
+
+/// Complete VPS RBSP syntax through trailing bits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VideoParameterSetSyntax {
+    /// Parsed VPS syntax through `vps_timing_info_present_flag`.
+    pub header: VideoParameterSetHeader,
+    /// Timing and HRD syntax, when present.
+    pub timing: Option<VpsTimingSyntax>,
+    /// `vps_extension_flag`.
+    pub vps_extension_flag: bool,
+    /// `vps_extension_data_flag` values.
+    pub extension_data: Vec<bool>,
+}
+
+impl VideoParameterSetSyntax {
+    /// Parses a complete `video_parameter_set_rbsp()`.
+    pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
+        let header = VideoParameterSetHeader::parse(reader)?;
+        let timing = if header.vps_timing_info_present_flag {
+            let num_units_in_tick = u32::try_from(reader.read_u(32)?).map_err(|_| {
+                SyntaxError::InvalidSyntaxValue("vps_num_units_in_tick does not fit u32")
+            })?;
+            let time_scale = u32::try_from(reader.read_u(32)?)
+                .map_err(|_| SyntaxError::InvalidSyntaxValue("vps_time_scale does not fit u32"))?;
+            let poc_proportional_to_timing_flag = reader.read_u(1)? != 0;
+            let num_ticks_poc_diff_one_minus1 = if poc_proportional_to_timing_flag {
+                Some(reader.read_ue()?)
+            } else {
+                None
+            };
+            let num_hrd_parameters = reader.read_ue()?;
+            let count = usize::try_from(num_hrd_parameters)
+                .map_err(|_| SyntaxError::InvalidSyntaxValue("too many VPS HRD parameters"))?;
+            let mut hrd_layer_set_idx = Vec::with_capacity(count);
+            let mut cprms_present_flag = Vec::with_capacity(count);
+            let mut hrd_parameters = Vec::with_capacity(count);
+            for index in 0..count {
+                hrd_layer_set_idx.push(reader.read_ue()?);
+                let cprms_present = if index == 0 {
+                    true
+                } else {
+                    reader.read_u(1)? != 0
+                };
+                cprms_present_flag.push(cprms_present);
+                hrd_parameters.push(parse_hrd_parameters(
+                    reader,
+                    cprms_present,
+                    header.vps_max_sub_layers_minus1,
+                )?);
+            }
+            Some(VpsTimingSyntax {
+                num_units_in_tick,
+                time_scale,
+                poc_proportional_to_timing_flag,
+                num_ticks_poc_diff_one_minus1,
+                num_hrd_parameters,
+                hrd_layer_set_idx,
+                cprms_present_flag,
+                hrd_parameters,
+            })
+        } else {
+            None
+        };
+        let vps_extension_flag = reader.read_u(1)? != 0;
+        let mut extension_data = Vec::new();
+        if vps_extension_flag {
+            while reader.more_rbsp_data() {
+                extension_data.push(reader.read_u(1)? != 0);
+            }
+        }
+        reader.read_rbsp_trailing_bits()?;
+        Ok(Self {
+            header,
+            timing,
+            vps_extension_flag,
+            extension_data,
+        })
+    }
 }
 
 impl VideoParameterSetHeader {
@@ -302,10 +402,9 @@ impl SequenceParameterSetHeader {
 }
 
 impl SequenceParameterSetSyntax {
-    /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM and
-    /// short- and long-term reference picture-set syntax, VUI syntax, and the
-    /// SPS range-extension syntax. The reader stops before multilayer, 3D,
-    /// SCC, and extension-data syntax.
+    /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM,
+    /// reference-picture sets, VUI syntax, and all SPS extension selectors and
+    /// bodies defined by the active H.265 profile.
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
         let header = SequenceParameterSetHeader::parse(reader)?;
         let scaling_list_enabled_flag = reader.read_u(1)? != 0;
@@ -389,8 +488,14 @@ impl SequenceParameterSetSyntax {
         };
         let sps_extension_present_flag = reader.read_u(1)? != 0;
         let sps_extension = if sps_extension_present_flag {
-            Some(SpsExtensionSyntax::parse(reader)?)
+            Some(SpsExtensionSyntax::parse(
+                reader,
+                header.chroma_format_idc,
+                header.bit_depth_luma_minus8,
+                header.bit_depth_chroma_minus8,
+            )?)
         } else {
+            reader.read_rbsp_trailing_bits()?;
             None
         };
         Ok(Self {
