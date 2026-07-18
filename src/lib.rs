@@ -25,8 +25,10 @@ pub use scan::{
     up_right_diagonal_scan, vertical_scan, z_scan_order,
 };
 pub use syntax::{
-    ebsp_to_rbsp, parse_profile_tier_level, BitReader, NalUnitHeader, ParsedNalUnit, ProfileInfo,
-    ProfileTierLevel, SequenceParameterSetHeader, SubLayerOrderingInfo, SubLayerProfileLevel,
-    SyntaxDescriptor, SyntaxError, SyntaxValue, VideoParameterSetHeader,
+    ebsp_to_rbsp, parse_profile_tier_level, parse_short_term_reference_picture_set, BitReader,
+    NalUnitHeader, ParsedNalUnit, PcmSyntax, ProfileInfo, ProfileTierLevel, ScalingListData,
+    ScalingListMatrix, SequenceParameterSetHeader, SequenceParameterSetSyntax,
+    ShortTermReferencePictureSet, SubLayerOrderingInfo, SubLayerProfileLevel, SyntaxDescriptor,
+    SyntaxError, SyntaxValue, VideoParameterSetHeader,
 };
 pub use tiles::TileLayout;

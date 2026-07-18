@@ -1,4 +1,7 @@
-use super::{parse_profile_tier_level, BitReader, ProfileTierLevel, SyntaxError};
+use super::{
+    parse_profile_tier_level, parse_short_term_reference_picture_set, BitReader, ProfileTierLevel,
+    ScalingListData, ShortTermReferencePictureSet, SyntaxError,
+};
 
 /// The parameter-set ordering values repeated for each sub-layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +152,47 @@ pub struct SequenceParameterSetHeader {
     pub max_transform_hierarchy_depth_intra: u64,
 }
 
+/// SPS tool, scaling-list and short-term-reference syntax following
+/// [`SequenceParameterSetHeader`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceParameterSetSyntax {
+    /// Parsed SPS common header.
+    pub header: SequenceParameterSetHeader,
+    /// `scaling_list_enabled_flag`.
+    pub scaling_list_enabled_flag: bool,
+    /// `sps_scaling_list_data_present_flag`.
+    pub sps_scaling_list_data_present_flag: bool,
+    /// Scaling-list data when present.
+    pub scaling_list_data: Option<ScalingListData>,
+    /// `amp_enabled_flag`.
+    pub amp_enabled_flag: bool,
+    /// `sample_adaptive_offset_enabled_flag`.
+    pub sample_adaptive_offset_enabled_flag: bool,
+    /// `pcm_enabled_flag`.
+    pub pcm_enabled_flag: bool,
+    /// PCM fields, present only when `pcm_enabled_flag` is true.
+    pub pcm: Option<PcmSyntax>,
+    /// `num_short_term_ref_pic_sets`.
+    pub num_short_term_ref_pic_sets: u64,
+    /// Short-term reference picture sets in syntax-table order.
+    pub short_term_ref_pic_sets: Vec<ShortTermReferencePictureSet>,
+}
+
+/// PCM fields from the optional SPS PCM syntax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PcmSyntax {
+    /// `pcm_sample_bit_depth_luma_minus1`.
+    pub sample_bit_depth_luma_minus1: u8,
+    /// `pcm_sample_bit_depth_chroma_minus1`.
+    pub sample_bit_depth_chroma_minus1: u8,
+    /// `log2_min_pcm_luma_coding_block_size_minus3`.
+    pub log2_min_pcm_luma_coding_block_size_minus3: u64,
+    /// `log2_diff_max_min_pcm_luma_coding_block_size`.
+    pub log2_diff_max_min_pcm_luma_coding_block_size: u64,
+    /// `pcm_loop_filter_disabled_flag`.
+    pub loop_filter_disabled_flag: bool,
+}
+
 impl SequenceParameterSetHeader {
     /// Parses the SPS common header through
     /// `max_transform_hierarchy_depth_intra`, leaving the following
@@ -225,6 +269,64 @@ impl SequenceParameterSetHeader {
             log2_diff_max_min_luma_transform_block_size,
             max_transform_hierarchy_depth_inter,
             max_transform_hierarchy_depth_intra,
+        })
+    }
+}
+
+impl SequenceParameterSetSyntax {
+    /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM and
+    /// short-term reference picture-set syntax. The reader stops before
+    /// `long_term_ref_pics_present_flag`.
+    pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
+        let header = SequenceParameterSetHeader::parse(reader)?;
+        let scaling_list_enabled_flag = reader.read_u(1)? != 0;
+        let sps_scaling_list_data_present_flag = if scaling_list_enabled_flag {
+            reader.read_u(1)? != 0
+        } else {
+            false
+        };
+        let scaling_list_data = if sps_scaling_list_data_present_flag {
+            Some(ScalingListData::parse(reader)?)
+        } else {
+            None
+        };
+        let amp_enabled_flag = reader.read_u(1)? != 0;
+        let sample_adaptive_offset_enabled_flag = reader.read_u(1)? != 0;
+        let pcm_enabled_flag = reader.read_u(1)? != 0;
+        let pcm = if pcm_enabled_flag {
+            Some(PcmSyntax {
+                sample_bit_depth_luma_minus1: reader.read_u(4)? as u8,
+                sample_bit_depth_chroma_minus1: reader.read_u(4)? as u8,
+                log2_min_pcm_luma_coding_block_size_minus3: reader.read_ue()?,
+                log2_diff_max_min_pcm_luma_coding_block_size: reader.read_ue()?,
+                loop_filter_disabled_flag: reader.read_u(1)? != 0,
+            })
+        } else {
+            None
+        };
+        let num_short_term_ref_pic_sets = reader.read_ue()?;
+        let set_count = usize::try_from(num_short_term_ref_pic_sets)
+            .map_err(|_| SyntaxError::InvalidSyntaxValue("too many short-term RPS entries"))?;
+        let mut short_term_ref_pic_sets = Vec::with_capacity(set_count);
+        for index in 0..set_count {
+            short_term_ref_pic_sets.push(parse_short_term_reference_picture_set(
+                reader,
+                index,
+                &short_term_ref_pic_sets,
+                set_count,
+            )?);
+        }
+        Ok(Self {
+            header,
+            scaling_list_enabled_flag,
+            sps_scaling_list_data_present_flag,
+            scaling_list_data,
+            amp_enabled_flag,
+            sample_adaptive_offset_enabled_flag,
+            pcm_enabled_flag,
+            pcm,
+            num_short_term_ref_pic_sets,
+            short_term_ref_pic_sets,
         })
     }
 }

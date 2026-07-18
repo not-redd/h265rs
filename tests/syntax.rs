@@ -1,8 +1,9 @@
 #![allow(missing_docs)]
 
 use h265rs::{
-    ebsp_to_rbsp, BitReader, NalUnitHeader, ParsedNalUnit, SequenceParameterSetHeader,
-    SyntaxDescriptor, SyntaxError, SyntaxValue, VideoParameterSetHeader,
+    ebsp_to_rbsp, BitReader, NalUnitHeader, ParsedNalUnit, ScalingListData,
+    SequenceParameterSetHeader, SequenceParameterSetSyntax, SyntaxDescriptor, SyntaxError,
+    SyntaxValue, VideoParameterSetHeader,
 };
 
 fn pack_bits(bits: &str) -> Vec<u8> {
@@ -199,4 +200,108 @@ fn sps_header_parser_derives_core_picture_fields() {
     assert_eq!(sps.pic_height_in_luma_samples, 1080);
     assert_eq!(sps.bit_depth_luma_minus8, 2);
     assert_eq!(sps.sub_layer_ordering_info.len(), 1);
+}
+
+#[test]
+fn scaling_list_parser_preserves_predicted_and_derived_matrices() {
+    let mut bits = Vec::new();
+    push_bits(&mut bits, 1, 1); // first matrix: explicit coefficients
+    for _ in 0..16 {
+        push_ue(&mut bits, 0); // se(v) zero
+    }
+    for _ in 1..20 {
+        push_bits(&mut bits, 0, 1); // prediction mode
+        push_ue(&mut bits, 0); // matrix delta
+    }
+    let bytes = finish_bits(&bits);
+    let mut reader = BitReader::new(&bytes);
+    let scaling = ScalingListData::parse(&mut reader).unwrap();
+    assert_eq!(scaling.matrices.len(), 20);
+    assert_eq!(scaling.matrices[0].coefficients, vec![8; 16]);
+    assert_eq!(scaling.matrices[0].delta_coefficients, vec![0; 16]);
+    assert!(!scaling.matrices[1].pred_mode_flag);
+    assert_eq!(scaling.matrices[19].size_id, 3);
+    assert_eq!(scaling.matrices[19].matrix_id, 3);
+}
+
+#[test]
+fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
+    let mut bits = Vec::new();
+    push_bits(&mut bits, 0, 4);
+    push_bits(&mut bits, 0, 3);
+    push_bits(&mut bits, 1, 1);
+    push_profile_tier_level(&mut bits);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 1);
+    push_ue(&mut bits, 64);
+    push_ue(&mut bits, 64);
+    push_bits(&mut bits, 0, 1);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_bits(&mut bits, 1, 1);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 0);
+    push_bits(&mut bits, 0, 1); // scaling list disabled
+    push_bits(&mut bits, 1, 1); // AMP enabled
+    push_bits(&mut bits, 1, 1); // SAO enabled
+    push_bits(&mut bits, 1, 1); // PCM enabled
+    push_bits(&mut bits, 7, 4);
+    push_bits(&mut bits, 7, 4);
+    push_ue(&mut bits, 0);
+    push_ue(&mut bits, 1);
+    push_bits(&mut bits, 1, 1);
+    push_ue(&mut bits, 1); // num_short_term_ref_pic_sets
+    push_ue(&mut bits, 1); // num_negative_pics
+    push_ue(&mut bits, 0); // num_positive_pics
+    push_ue(&mut bits, 0); // delta_poc_s0_minus1
+    push_bits(&mut bits, 1, 1); // used_by_curr_pic_s0_flag
+
+    let bytes = finish_bits(&bits);
+    let mut reader = BitReader::new(&bytes);
+    let sps = SequenceParameterSetSyntax::parse(&mut reader).unwrap();
+    assert_eq!(sps.header.pic_width_in_luma_samples, 64);
+    assert!(!sps.scaling_list_enabled_flag);
+    assert!(sps.amp_enabled_flag);
+    assert!(sps.sample_adaptive_offset_enabled_flag);
+    assert_eq!(sps.pcm.unwrap().sample_bit_depth_luma_minus1, 7);
+    assert_eq!(sps.num_short_term_ref_pic_sets, 1);
+    assert_eq!(sps.short_term_ref_pic_sets[0].num_delta_pocs, 1);
+}
+
+#[test]
+fn inter_predicted_short_term_rps_uses_previous_num_delta_pocs() {
+    let mut bits = Vec::new();
+    push_ue(&mut bits, 1); // first set: one negative picture
+    push_ue(&mut bits, 0); // no positive pictures
+    push_ue(&mut bits, 0);
+    push_bits(&mut bits, 1, 1);
+    push_bits(&mut bits, 1, 1); // inter_ref_pic_set_prediction_flag
+    push_bits(&mut bits, 0, 1); // delta_rps_sign
+    push_ue(&mut bits, 0); // abs_delta_rps_minus1
+    push_bits(&mut bits, 1, 1); // used_by_curr_pic_flag[0]
+    push_bits(&mut bits, 0, 1); // used_by_curr_pic_flag[1]
+    push_bits(&mut bits, 1, 1); // use_delta_flag[1]
+
+    let bytes = finish_bits(&bits);
+    let mut reader = BitReader::new(&bytes);
+    let first = h265rs::parse_short_term_reference_picture_set(&mut reader, 0, &[], 2).unwrap();
+    let second = h265rs::parse_short_term_reference_picture_set(
+        &mut reader,
+        1,
+        std::slice::from_ref(&first),
+        2,
+    )
+    .unwrap();
+    assert_eq!(second.reference_rps_idx, Some(0));
+    assert_eq!(second.used_by_curr_pic_flag, vec![true, false]);
+    assert_eq!(second.use_delta_flag, vec![false, true]);
+    assert_eq!(second.num_delta_pocs, 2);
 }
