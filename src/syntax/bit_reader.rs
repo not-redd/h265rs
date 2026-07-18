@@ -37,6 +37,7 @@ pub enum SyntaxValue {
 pub struct BitReader<'a> {
     data: &'a [u8],
     bit_position: usize,
+    bit_limit: usize,
 }
 
 impl<'a> BitReader<'a> {
@@ -45,6 +46,7 @@ impl<'a> BitReader<'a> {
         Self {
             data,
             bit_position: 0,
+            bit_limit: data.len() * 8,
         }
     }
 
@@ -60,7 +62,22 @@ impl<'a> BitReader<'a> {
 
     /// Returns the number of unread bits.
     pub const fn bits_remaining(&self) -> usize {
-        self.bit_length().saturating_sub(self.bit_position)
+        self.bit_limit.saturating_sub(self.bit_position)
+    }
+
+    pub(crate) fn set_substream(
+        &mut self,
+        start_bit: usize,
+        end_bit: usize,
+    ) -> Result<(), SyntaxError> {
+        if start_bit > end_bit || end_bit > self.data.len() * 8 {
+            return Err(SyntaxError::InvalidSyntaxValue(
+                "bit-reader substream is outside its input",
+            ));
+        }
+        self.bit_position = start_bit;
+        self.bit_limit = end_bit;
+        Ok(())
     }
 
     /// Implements `byte_aligned()`.

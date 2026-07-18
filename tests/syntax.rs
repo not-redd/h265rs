@@ -736,7 +736,7 @@ fn cabac_slice_data_primitives_follow_clause_7_conditions() {
     chroma_state.parse(&mut chroma, true, 2).unwrap();
     assert_eq!(chroma_state.index, Some(2));
 
-    let mut sao = MockCabac::new([1, 0, 1, 0, 2, 0, 1, 3, 0, 0, 0, 0, 0]);
+    let mut sao = MockCabac::new([1, 0, 1, 0, 2, 0, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let sao = parse_sao(&mut sao, false, false, true, true, true).unwrap();
     assert_eq!(sao.luma.as_ref().unwrap().type_idx, 1);
     assert_eq!(sao.luma.as_ref().unwrap().offset_sign, vec![false, true]);
@@ -834,6 +834,7 @@ fn slice_segment_data_parses_ctu_and_end_flag() {
         slice_addr_rs: 0,
         tiles_enabled_flag: false,
         entropy_coding_sync_enabled_flag: false,
+        entry_point_substreams: &[],
         tile_ids: &[0],
         ctb_addr_in_ts_to_rs: &[0],
         ctb_addr_rs_to_ts: &[0],

@@ -8,7 +8,10 @@ license = "MIT OR Apache-2.0"
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+jpeg-encoder = "0.7.0"
+rust_h265 = "0.1.0"
+
 [lints.rust]
 missing_debug_implementations = "warn"
 missing_docs = "warn"
-

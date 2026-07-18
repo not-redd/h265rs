@@ -236,6 +236,15 @@ pub trait CabacReader {
     /// Reads an `rbsp`-level byte-alignment bit sequence after CABAC syntax.
     fn byte_alignment(&mut self) -> Result<(), SyntaxError>;
 
+    /// Selects the byte-bounded CABAC substream for the next entry point.
+    fn set_substream(
+        &mut self,
+        _start_byte: usize,
+        _end_byte: Option<usize>,
+    ) -> Result<(), SyntaxError> {
+        Ok(())
+    }
+
     /// Initializes the arithmetic engine for the next CABAC substream after
     /// a tile/WPP byte-alignment boundary.
     fn initialize_arithmetic_engine(&mut self) -> Result<(), SyntaxError> {
@@ -1182,6 +1191,32 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
     }
     let mut coded_sub_block_grid = vec![vec![false; sub_block_side]; sub_block_side];
     let mut coded_sub_block_flags = Vec::with_capacity(last_sub_block + 1);
+    let mut sig_coeff_flags = Vec::new();
+
+    // residual_coding() signals all coded-sub-block/significance flags first,
+    // then all greater1/greater2 flags, then signs, and finally level
+    // remainders.  Keeping one record per sub-block lets the decoder consume
+    // those four syntax groups in that order while still returning the
+    // compact coefficient vectors used by reconstruction.
+    struct ResidualBlock {
+        significant: Vec<usize>,
+        first_sig: usize,
+        last_sig: usize,
+        greater1: [bool; 16],
+        greater1_contexts: [usize; 16],
+        signs: [bool; 16],
+        abs_levels: [u64; 16],
+    }
+    let mut blocks = Vec::with_capacity(last_sub_block + 1);
+    let implicit_rdpcm_sign_hiding_disabled = context.cu_pred_mode_intra
+        && context.implicit_rdpcm_enabled_flag
+        && transform_skip_flag == Some(true)
+        && (context.intra_luma_pred_mode == 10 || context.intra_luma_pred_mode == 26);
+    let sign_hiding_allowed = context.sign_data_hiding_enabled_flag
+        && !context.cu_transquant_bypass_flag
+        && !implicit_rdpcm_sign_hiding_disabled
+        && explicit_rdpcm_flag != Some(true);
+
     for index in (0..=last_sub_block).rev() {
         let (x_s, y_s) = sub_block_scan_order[index];
         let mut csbf_ctx = 0_usize;
@@ -1205,30 +1240,16 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
         };
         coded_sub_block_grid[y_s][x_s] = coded;
         coded_sub_block_flags.push(coded);
-    }
 
-    let mut block_sig_coeff_flags = Vec::with_capacity(coded_sub_block_flags.len());
-    for (block_index, coded) in coded_sub_block_flags.iter().copied().enumerate() {
-        let sub_block_index = last_sub_block - block_index;
-        let mut block_flags = vec![false; 16];
-        let is_last_sub_block = sub_block_index == last_sub_block;
+        let is_last_sub_block = index == last_sub_block;
+        let sig_end = if is_last_sub_block { last_scan_pos } else { 16 };
+        let mut block_flags = [false; 16];
         if is_last_sub_block {
             block_flags[last_scan_pos] = true;
         }
-        let first_scan_pos = if is_last_sub_block {
-            last_scan_pos.saturating_sub(1)
-        } else {
-            15
-        };
-        let infer_dc_sig_coeff_flag = sub_block_index > 0 && sub_block_index < last_sub_block;
-        let mut infer_dc = infer_dc_sig_coeff_flag;
-        for coefficient in (0..=first_scan_pos).rev() {
-            if is_last_sub_block && coefficient == last_scan_pos {
-                continue;
-            }
+        let mut infer_dc = index > 0 && index < last_sub_block;
+        for coefficient in (0..sig_end).rev() {
             let (x_c, y_c) = coefficient_scan_order[coefficient];
-            let x_s = x_c >> 2;
-            let y_s = y_c >> 2;
             let sig_ctx = if options.transform_skip_context_enabled_flag
                 && (transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag)
             {
@@ -1244,15 +1265,17 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
                 } else {
                     27 + base
                 }
-            } else if x_c + y_c == 0 {
+            } else if x_c + y_c == 0 && x_s + y_s == 0 {
                 0
             } else {
+                let x_sb = x_c >> 2;
+                let y_sb = y_c >> 2;
                 let mut prev_csbf = 0_usize;
-                if x_s + 1 < sub_block_side {
-                    prev_csbf += usize::from(coded_sub_block_grid[y_s][x_s + 1]);
+                if x_sb + 1 < sub_block_side {
+                    prev_csbf += usize::from(coded_sub_block_grid[y_sb][x_sb + 1]);
                 }
-                if y_s + 1 < sub_block_side {
-                    prev_csbf += usize::from(coded_sub_block_grid[y_s + 1][x_s]) << 1;
+                if y_sb + 1 < sub_block_side {
+                    prev_csbf += usize::from(coded_sub_block_grid[y_sb + 1][x_sb]) << 1;
                 }
                 let x_p = x_c & 3;
                 let y_p = y_c & 3;
@@ -1263,7 +1286,7 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
                     _ => 2,
                 };
                 if c_idx == 0 {
-                    if x_s + y_s > 0 {
+                    if x_sb + y_sb > 0 {
                         sig_ctx += 3;
                     }
                     sig_ctx += if context.log2_trafo_size == 3 {
@@ -1293,188 +1316,128 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
                 infer_dc = false;
             }
         }
-        block_sig_coeff_flags.push(block_flags);
-    }
-    let mut sig_coeff_flags = Vec::with_capacity(coded_sub_block_flags.len() * 16);
-    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
-        let first_scan_pos = if last_sub_block - block_index == last_sub_block {
-            last_scan_pos
-        } else {
-            15
-        };
-        for coefficient in (0..=first_scan_pos).rev() {
+        let first_coeff = if is_last_sub_block { last_scan_pos } else { 15 };
+        for coefficient in (0..=first_coeff).rev() {
             sig_coeff_flags.push(block_flags[coefficient]);
         }
+        let significant: Vec<usize> = (0..=first_coeff)
+            .rev()
+            .filter(|&coefficient| block_flags[coefficient])
+            .collect();
+        let first_sig = significant.last().copied().unwrap_or(0);
+        let last_sig = significant.first().copied().unwrap_or(0);
+        blocks.push(ResidualBlock {
+            significant,
+            first_sig,
+            last_sig,
+            greater1: [false; 16],
+            greater1_contexts: [0; 16],
+            signs: [false; 16],
+            abs_levels: [0; 16],
+        });
     }
-    let significant_count = sig_coeff_flags.iter().filter(|flag| **flag).count();
-    let mut coeff_abs_level_greater1_flags = Vec::with_capacity(significant_count.min(8));
-    let mut greater1_context_sets = Vec::with_capacity(significant_count.min(8));
-    let mut significant_seen = 0usize;
-    let mut ctx_set = 0_usize;
-    let mut greater1_ctx = 0_usize;
+
+    let mut greater1_context = 1usize;
     let mut last_greater1_flag = false;
     let mut first_sub_block = true;
-    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
-        let sub_block_index = last_sub_block - block_index;
-        let mut first_in_sub_block = true;
-        let first_scan_pos = if sub_block_index == last_sub_block {
-            last_scan_pos
-        } else {
-            15
-        };
-        for coefficient in (0..=first_scan_pos).rev() {
-            let significant = block_flags[coefficient];
-            if significant {
-                if first_in_sub_block {
-                    ctx_set = if sub_block_index == 0 || c_idx > 0 {
-                        0
-                    } else {
-                        2
-                    };
-                    if !first_sub_block {
-                        if greater1_ctx > 0 {
-                            greater1_ctx = if last_greater1_flag {
-                                0
-                            } else {
-                                greater1_ctx + 1
-                            };
-                        }
-                        if greater1_ctx == 0 {
-                            ctx_set += 1;
-                        }
+    let mut coeff_abs_level_greater1_flags = Vec::new();
+    let mut block_last_greater1 = None;
+    let mut block_ctx_set = 0usize;
+    let block_count = blocks.len();
+    for (block_index, block) in blocks.iter_mut().enumerate() {
+        for &coefficient in &block.significant {
+            let first_in_block = coefficient == block.last_sig;
+            if first_in_block {
+                let mut ctx_set = if block_index == block_count - 1 || c_idx > 0 {
+                    0
+                } else {
+                    2
+                };
+                if !first_sub_block {
+                    if greater1_context > 0 {
+                        greater1_context = if last_greater1_flag {
+                            0
+                        } else {
+                            greater1_context + 1
+                        };
                     }
-                    greater1_ctx = 1;
-                    first_in_sub_block = false;
-                    first_sub_block = false;
-                } else if greater1_ctx > 0 {
-                    greater1_ctx = if last_greater1_flag {
-                        0
-                    } else {
-                        greater1_ctx + 1
-                    };
-                }
-                if significant_seen < 8 {
-                    let mut ctx_inc = (ctx_set * 4) + greater1_ctx.min(3);
-                    if c_idx > 0 {
-                        ctx_inc += 16;
+                    if greater1_context == 0 {
+                        ctx_set += 1;
                     }
-                    greater1_context_sets.push(ctx_set);
-                    coeff_abs_level_greater1_flags.push(
-                        cabac.read_ae_named(CabacContextTable::CoeffAbsLevelGreater1, ctx_inc)?
-                            != 0,
-                    );
-                    last_greater1_flag = *coeff_abs_level_greater1_flags.last().ok_or(
-                        SyntaxError::InvalidSyntaxValue("greater1 context state is empty"),
-                    )?;
                 }
-                significant_seen += 1;
+                greater1_context = 1;
+                first_sub_block = false;
+                block_ctx_set = ctx_set;
+            } else if greater1_context > 0 {
+                greater1_context = if last_greater1_flag {
+                    0
+                } else {
+                    greater1_context + 1
+                };
+            }
+            let context_index =
+                block_ctx_set * 4 + greater1_context.min(3) + if c_idx > 0 { 16 } else { 0 };
+            block.greater1_contexts[coefficient] = context_index;
+            let flag =
+                cabac.read_ae_named(CabacContextTable::CoeffAbsLevelGreater1, context_index)? != 0;
+            block.greater1[coefficient] = flag;
+            coeff_abs_level_greater1_flags.push(flag);
+            last_greater1_flag = flag;
+            if flag && block_last_greater1.is_none() {
+                block_last_greater1 = Some((block_index, coefficient));
             }
         }
     }
-    let last_greater1 = coeff_abs_level_greater1_flags.iter().position(|flag| *flag);
-    let coeff_abs_level_greater2_flag = if last_greater1.is_some() {
-        let ctx_set = last_greater1
-            .and_then(|index| greater1_context_sets.get(index).copied())
-            .unwrap_or(0);
-        Some(
-            cabac.read_ae_named(
+
+    let coeff_abs_level_greater2_flag =
+        block_last_greater1.map_or(Ok(None), |(block_index, coefficient)| {
+            let ctx_set = blocks[block_index].greater1_contexts[coefficient] / 4;
+            let flag = cabac.read_ae_named(
                 CabacContextTable::CoeffAbsLevelGreater2,
                 ctx_set + if c_idx > 0 { 4 } else { 0 },
-            )? != 0,
-        )
-    } else {
-        None
-    };
+            )? != 0;
+            Ok(Some(flag))
+        })?;
     if options.cabac_bypass_alignment_enabled_flag {
         cabac.cabac_bypass_alignment()?;
     }
-    let implicit_rdpcm_sign_hiding_disabled = context.cu_pred_mode_intra
-        && context.implicit_rdpcm_enabled_flag
-        && transform_skip_flag == Some(true)
-        && (context.intra_luma_pred_mode == 10 || context.intra_luma_pred_mode == 26);
-    let sign_hiding_allowed = context.sign_data_hiding_enabled_flag
-        && !context.cu_transquant_bypass_flag
-        && !implicit_rdpcm_sign_hiding_disabled
-        && explicit_rdpcm_flag != Some(true);
-    let sign_hidden_by_block: Vec<Option<usize>> = block_sig_coeff_flags
-        .iter()
-        .enumerate()
-        .map(|(block_index, block_flags)| {
-            let sub_block_index = last_sub_block - block_index;
-            let first_scan_pos = if sub_block_index == last_sub_block {
-                last_scan_pos
-            } else {
-                15
-            };
-            let significant_positions: Vec<usize> = (0..=first_scan_pos)
-                .filter(|&position| block_flags[position])
-                .collect();
-            match (significant_positions.first(), significant_positions.last()) {
-                (Some(&first), Some(&last))
-                    if sign_hiding_allowed && last.saturating_sub(first) > 3 =>
-                {
-                    Some(first)
-                }
-                _ => None,
-            }
-        })
-        .collect();
-    let mut coeff_sign_flags = Vec::with_capacity(significant_count);
-    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
-        let sub_block_index = last_sub_block - block_index;
-        let first_scan_pos = if sub_block_index == last_sub_block {
-            last_scan_pos
-        } else {
-            15
-        };
-        for coefficient in (0..=first_scan_pos).rev() {
-            if block_flags[coefficient] && sign_hidden_by_block[block_index] != Some(coefficient) {
-                coeff_sign_flags.push(cabac.read_bypass_bin()? != 0);
+
+    let mut coeff_sign_flags = Vec::new();
+    for block in &mut blocks {
+        let sign_hidden = sign_hiding_allowed && block.last_sig.saturating_sub(block.first_sig) > 3;
+        for &coefficient in &block.significant {
+            if !(sign_hidden && coefficient == block.first_sig) {
+                let sign = cabac.read_bypass_bin()? != 0;
+                block.signs[coefficient] = sign;
+                coeff_sign_flags.push(sign);
             }
         }
     }
+
+    let transform_skip_or_bypass =
+        transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag;
+    let sb_type = 2 * usize::from(c_idx == 0) + usize::from(transform_skip_or_bypass);
+    let rice_parameter_max = if options.persistent_rice_adaptation_enabled_flag {
+        8
+    } else {
+        4
+    };
+    let mut num_sig_coeff = 0usize;
     let mut coeff_abs_level_remaining = Vec::new();
-    let mut coefficients = Vec::with_capacity(significant_count);
-    let mut greater1_index = 0usize;
-    let mut sign_index = 0usize;
-    for (block_index, block_flags) in block_sig_coeff_flags.iter().enumerate() {
-        let sub_block_index = last_sub_block - block_index;
-        let first_scan_pos = if sub_block_index == last_sub_block {
-            last_scan_pos
-        } else {
-            15
-        };
-        let transform_skip_or_bypass =
-            transform_skip_flag == Some(true) || context.cu_transquant_bypass_flag;
-        let sb_type = 2 * usize::from(c_idx == 0) + usize::from(transform_skip_or_bypass);
+    for (block_index, block) in blocks.iter_mut().enumerate() {
         let mut rice_parameter = rice_state.initial_rice_parameter(
             c_idx,
             transform_skip_or_bypass,
             options.persistent_rice_adaptation_enabled_flag,
         );
-        let rice_parameter_max = if options.persistent_rice_adaptation_enabled_flag {
-            8
-        } else {
-            4
-        };
         let mut first_remaining = true;
-        let mut sum_abs_level = 0i64;
-        for coefficient in (0..=first_scan_pos).rev() {
-            if !block_flags[coefficient] {
-                continue;
-            }
-            let greater1 = coeff_abs_level_greater1_flags
-                .get(greater1_index)
-                .copied()
-                .unwrap_or(false);
-            let greater2 = if Some(greater1_index) == last_greater1 {
-                coeff_abs_level_greater2_flag.unwrap_or(false)
-            } else {
-                false
-            };
+        for &coefficient in &block.significant {
+            let greater1 = block.greater1[coefficient];
+            let greater2 = block_last_greater1 == Some((block_index, coefficient))
+                && coeff_abs_level_greater2_flag == Some(true);
             let base_level = 1 + u64::from(greater1) + u64::from(greater2);
-            let threshold = if greater1_index < 8 {
-                if Some(greater1_index) == last_greater1 {
+            let threshold = if num_sig_coeff < 8 {
+                if block_last_greater1 == Some((block_index, coefficient)) {
                     3
                 } else {
                     2
@@ -1509,19 +1472,27 @@ pub fn parse_residual_coding_for_component_with_options_and_state(
             } else {
                 0
             };
-            let magnitude = i64::try_from(remaining + base_level).map_err(|_| {
+            block.abs_levels[coefficient] = base_level + remaining;
+            num_sig_coeff += 1;
+        }
+    }
+
+    let mut coefficients = Vec::new();
+    for block in &blocks {
+        let sign_hidden = sign_hiding_allowed && block.last_sig.saturating_sub(block.first_sig) > 3;
+        let mut sum_abs_level = 0u64;
+        for &coefficient in &block.significant {
+            let magnitude = block.abs_levels[coefficient];
+            sum_abs_level += magnitude;
+            let sign = if sign_hidden && coefficient == block.first_sig {
+                sum_abs_level & 1 != 0
+            } else {
+                block.signs[coefficient]
+            };
+            let magnitude = i64::try_from(magnitude).map_err(|_| {
                 SyntaxError::InvalidSyntaxValue("coefficient magnitude is too large")
             })?;
-            sum_abs_level += magnitude;
-            let sign = if sign_hidden_by_block[block_index] == Some(coefficient) {
-                sum_abs_level % 2 != 0
-            } else {
-                let value = coeff_sign_flags.get(sign_index).copied().unwrap_or(false);
-                sign_index += 1;
-                value
-            };
             coefficients.push(if sign { -magnitude } else { magnitude });
-            greater1_index += 1;
         }
     }
     Ok(ResidualCodingSyntax {
@@ -1653,11 +1624,15 @@ fn parse_transform_tree_node(
     residual_options: ResidualCodingOptions,
     rice_state: &mut ResidualRiceState,
 ) -> Result<TransformTreeNode, SyntaxError> {
-    let split_allowed = log2_trafo_size <= context.max_tb_log2_size
+    let split_inferred = log2_trafo_size > context.max_tb_log2_size;
+    let split_allowed = !split_inferred
+        && log2_trafo_size <= context.max_tb_log2_size
         && log2_trafo_size > context.min_tb_log2_size
         && trafo_depth < context.max_trafo_depth
         && !(context.intra_split_flag && trafo_depth == 0);
-    let split_transform_flag = if split_allowed {
+    let split_transform_flag = if split_inferred {
+        true
+    } else if split_allowed {
         let ctx_inc = usize::from(5_u8.saturating_sub(log2_trafo_size));
         cabac.read_ae_named(CabacContextTable::SplitTransform, ctx_inc)? != 0
     } else {
@@ -2413,6 +2388,9 @@ pub struct CodingTreeNodeSyntax {
     pub children: Vec<CodingTreeNodeSyntax>,
     /// Coding-unit syntax at an unsplit leaf.
     pub coding_unit: Option<CodingUnitSyntax>,
+    /// Transform-tree syntax at an unsplit leaf, when the coding unit's
+    /// `rqt_root_cbf` requires it and the transform-aware parser was used.
+    pub transform_tree: Option<TransformTreeNode>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2543,6 +2521,44 @@ pub fn parse_coding_quadtree(
         8,
         8,
         false,
+        None,
+    )
+}
+
+/// Parses `coding_quadtree()` and consumes each leaf's `transform_tree()`
+/// when the coding unit requires residual syntax.
+///
+/// The original [`parse_coding_quadtree`] remains available for callers that
+/// only need Clause 7 coding-unit structure. This variant is the path used by
+/// a complete VCL decoder because CABAC must continue through transform-tree
+/// and residual syntax before the CTU termination bin is read.
+pub fn parse_coding_quadtree_with_transforms(
+    cabac: &mut impl CabacReader,
+    x: u64,
+    y: u64,
+    log2_cb_size: u8,
+    cqt_depth: u32,
+    geometry: CodingQuadtreeGeometry,
+    coding_unit_context: CodingUnitContext,
+    transform_context: TransformTreeContext,
+) -> Result<CodingTreeNodeSyntax, SyntaxError> {
+    let size = block_size(log2_cb_size)?;
+    let mut state = CodingNeighbourState::default();
+    state.begin_ctu(x, y, size, usize::MAX, false, false);
+    parse_coding_quadtree_inner(
+        cabac,
+        x,
+        y,
+        log2_cb_size,
+        cqt_depth,
+        geometry,
+        coding_unit_context,
+        &mut state,
+        usize::MAX,
+        8,
+        8,
+        false,
+        Some(transform_context),
     )
 }
 
@@ -2560,6 +2576,7 @@ fn parse_coding_quadtree_inner(
     bit_depth_luma: usize,
     bit_depth_chroma: usize,
     amp_enabled: bool,
+    transform_context: Option<TransformTreeContext>,
 ) -> Result<CodingTreeNodeSyntax, SyntaxError> {
     let size = block_size(log2_cb_size)?;
     let right = x.checked_add(size).ok_or(SyntaxError::InvalidSyntaxValue(
@@ -2610,6 +2627,7 @@ fn parse_coding_quadtree_inner(
                     bit_depth_luma,
                     bit_depth_chroma,
                     amp_enabled,
+                    transform_context,
                 )?);
             }
         }
@@ -2631,6 +2649,31 @@ fn parse_coding_quadtree_inner(
             amp_enabled,
         )?)
     };
+    let transform_tree = if let (Some(coding_unit), Some(mut context)) =
+        (coding_unit.as_ref(), transform_context)
+    {
+        if coding_unit.transform_tree_required {
+            context.cu_pred_mode_intra = coding_unit.pred_mode_flag != Some(false);
+            context.cu_transquant_bypass_flag = coding_unit.cu_transquant_bypass_flag == Some(true);
+            context.intra_split_flag = context.cu_pred_mode_intra && coding_unit.part_mode == 1;
+            let transform_log2_size = if context.intra_split_flag {
+                log2_cb_size.saturating_sub(1)
+            } else {
+                log2_cb_size
+            };
+            Some(parse_transform_tree(
+                cabac,
+                context,
+                x,
+                y,
+                transform_log2_size,
+            )?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if let Some(ref coding_unit) = coding_unit {
         state.record(
             x,
@@ -2649,6 +2692,7 @@ fn parse_coding_quadtree_inner(
         split_cu_flag,
         children,
         coding_unit,
+        transform_tree,
     })
 }
 
@@ -2680,6 +2724,8 @@ pub struct SliceSegmentDataContext<'a> {
     pub tiles_enabled_flag: bool,
     /// `entropy_coding_sync_enabled_flag`.
     pub entropy_coding_sync_enabled_flag: bool,
+    /// RBSP-relative byte ranges for the signalled tile/WPP substreams.
+    pub entry_point_substreams: &'a [(usize, usize)],
     /// Tile identifier indexed by tile-scan address.
     pub tile_ids: &'a [u64],
     /// `CtbAddrTsToRs` mapping.
@@ -2789,6 +2835,42 @@ pub fn parse_slice_segment_layer_rbsp_with_bit_depth_and_amp(
     })
 }
 
+/// Parses a complete VCL slice segment and consumes transform-tree/residual
+/// syntax for every coding-unit leaf.
+pub fn parse_slice_segment_layer_rbsp_with_transforms(
+    reader: &mut BitReader<'_>,
+    cabac: &mut impl CabacReader,
+    header_context: &SliceSegmentHeaderContext<'_>,
+    data_context: Option<SliceSegmentDataContext<'_>>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
+    transform_context: TransformTreeContext,
+) -> Result<SliceSegmentLayerSyntax, SyntaxError> {
+    let header = crate::syntax::parse_slice_segment_header(reader, header_context)?;
+    let data = if header.dependent_slice_segment_flag {
+        None
+    } else {
+        let context = data_context.ok_or(SyntaxError::InvalidSyntaxValue(
+            "independent slice segment requires slice-data context",
+        ))?;
+        Some(parse_slice_segment_data_with_transforms(
+            cabac,
+            context,
+            bit_depth_luma,
+            bit_depth_chroma,
+            amp_enabled,
+            transform_context,
+        )?)
+    };
+    let cabac_zero_word_count = cabac.rbsp_slice_segment_trailing_bits()?;
+    Ok(SliceSegmentLayerSyntax {
+        header,
+        data,
+        cabac_zero_word_count,
+    })
+}
+
 fn map_at(values: &[usize], index: usize, name: &'static str) -> Result<usize, SyntaxError> {
     values
         .get(index)
@@ -2837,6 +2919,44 @@ pub fn parse_slice_segment_data_with_bit_depth_and_amp(
     bit_depth_luma: usize,
     bit_depth_chroma: usize,
     amp_enabled: bool,
+) -> Result<SliceSegmentDataSyntax, SyntaxError> {
+    parse_slice_segment_data_with_bit_depth_and_amp_and_transforms(
+        cabac,
+        context,
+        bit_depth_luma,
+        bit_depth_chroma,
+        amp_enabled,
+        None,
+    )
+}
+
+/// Parses slice-segment data and consumes transform-tree/residual syntax at
+/// every coding-unit leaf that requires it.
+pub fn parse_slice_segment_data_with_transforms(
+    cabac: &mut impl CabacReader,
+    context: SliceSegmentDataContext<'_>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
+    transform_context: TransformTreeContext,
+) -> Result<SliceSegmentDataSyntax, SyntaxError> {
+    parse_slice_segment_data_with_bit_depth_and_amp_and_transforms(
+        cabac,
+        context,
+        bit_depth_luma,
+        bit_depth_chroma,
+        amp_enabled,
+        Some(transform_context),
+    )
+}
+
+fn parse_slice_segment_data_with_bit_depth_and_amp_and_transforms(
+    cabac: &mut impl CabacReader,
+    context: SliceSegmentDataContext<'_>,
+    bit_depth_luma: usize,
+    bit_depth_chroma: usize,
+    amp_enabled: bool,
+    transform_context: Option<TransformTreeContext>,
 ) -> Result<SliceSegmentDataSyntax, SyntaxError> {
     let mut ctb_addr_in_ts = context.start_ctb_addr_in_ts;
     let mut coding_tree_units = Vec::new();
@@ -2910,6 +3030,7 @@ pub fn parse_slice_segment_data_with_bit_depth_and_amp(
             bit_depth_luma,
             bit_depth_chroma,
             amp_enabled,
+            transform_context,
         )?;
         let store_wpp_state = context.entropy_coding_sync_enabled_flag
             && (ctb_addr_in_rs % context.pic_width_in_ctbs == 1
@@ -2988,6 +3109,11 @@ pub fn parse_slice_segment_data_with_bit_depth_and_amp(
                 } else {
                     cabac.reset_contexts_to_initial();
                 }
+            }
+            if let Some(&(start_byte, end_byte)) =
+                context.entry_point_substreams.get(subset_boundary_count)
+            {
+                cabac.set_substream(start_byte, Some(end_byte))?;
             }
             cabac.initialize_arithmetic_engine()?;
             subset_boundary_count += 1;
@@ -3249,6 +3375,8 @@ pub struct SaoSyntax {
     pub luma: Option<SaoComponentSyntax>,
     /// Chroma component syntax, when enabled.
     pub chroma: Option<SaoComponentSyntax>,
+    /// Cr component syntax, when chroma SAO is enabled.
+    pub chroma_cr: Option<SaoComponentSyntax>,
 }
 
 fn parse_sao_component(
@@ -3256,6 +3384,14 @@ fn parse_sao_component(
     bit_depth: usize,
 ) -> Result<SaoComponentSyntax, SyntaxError> {
     let type_idx = cabac.read_truncated_rice_context(CabacContextTable::SaoType, 0, 1, 2, 0)?;
+    parse_sao_component_payload(cabac, bit_depth, type_idx)
+}
+
+fn parse_sao_component_payload(
+    cabac: &mut impl CabacReader,
+    bit_depth: usize,
+    type_idx: u64,
+) -> Result<SaoComponentSyntax, SyntaxError> {
     let mut offset_abs = [0; 4];
     let offset_c_max = (1_u64
         << u32::try_from(bit_depth.min(10).saturating_sub(5))
@@ -3335,6 +3471,7 @@ pub fn parse_sao_with_bit_depth(
             merge_up_flag,
             luma: None,
             chroma: None,
+            chroma_cr: None,
         });
     }
     let luma = if slice_sao_luma_flag {
@@ -3347,10 +3484,20 @@ pub fn parse_sao_with_bit_depth(
     } else {
         None
     };
+    let chroma_cr = if let Some(chroma) = chroma.as_ref() {
+        Some(parse_sao_component_payload(
+            cabac,
+            bit_depth_chroma,
+            chroma.type_idx,
+        )?)
+    } else {
+        None
+    };
     Ok(SaoSyntax {
         merge_left_flag,
         merge_up_flag,
         luma,
         chroma,
+        chroma_cr,
     })
 }

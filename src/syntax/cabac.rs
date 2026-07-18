@@ -757,6 +757,17 @@ impl<'a> CabacDecoder<'a> {
         Ok(())
     }
 
+    /// Selects a byte-bounded CABAC substream and positions its reader.
+    pub fn set_substream(
+        &mut self,
+        start_byte: usize,
+        end_byte: Option<usize>,
+    ) -> Result<(), SyntaxError> {
+        let end_byte = end_byte.unwrap_or_else(|| self.reader.bit_length() / 8);
+        self.reader
+            .set_substream(start_byte.saturating_mul(8), end_byte.saturating_mul(8))
+    }
+
     /// Decodes a context-coded bin using context index `ctx_idx`.
     pub fn decode_decision(&mut self, ctx_idx: usize) -> Result<u64, SyntaxError> {
         let context = self
@@ -1347,8 +1358,25 @@ impl CabacReader for CabacDecoder<'_> {
             }
             prefix += 1;
         }
-        self.read_exp_golomb(0)?
-            .checked_add(5)
+        let mut suffix = 0_u64;
+        let mut length = 0_u32;
+        while length < 7 && self.decode_bypass()? != 0 {
+            suffix = suffix
+                .checked_add(1_u64 << length)
+                .ok_or(SyntaxError::ExpGolombOverflow)?;
+            length += 1;
+        }
+        if length == 7 {
+            return Err(SyntaxError::InvalidSyntaxValue(
+                "CU delta-QP suffix exceeds CABAC limit",
+            ));
+        }
+        while length > 0 {
+            length -= 1;
+            suffix |= self.decode_bypass()? << length;
+        }
+        prefix
+            .checked_add(suffix)
             .ok_or(SyntaxError::ExpGolombOverflow)
     }
     fn read_coeff_abs_level_remaining(&mut self, _base_level: u64) -> Result<u64, SyntaxError> {
@@ -1395,21 +1423,40 @@ impl CabacReader for CabacDecoder<'_> {
                 "coefficient Rice parameter is too large",
             ));
         }
-        let c_max = 4_u64
-            .checked_shl(u32::from(rice_parameter))
-            .ok_or(SyntaxError::ExpGolombOverflow)?;
-        let prefix = self.read_truncated_rice(c_max, rice_parameter)?;
-        if prefix != c_max {
-            return Ok(prefix);
+        let mut prefix = 0_u32;
+        while prefix < 31 && self.decode_bypass()? != 0 {
+            prefix += 1;
         }
-        let suffix = if extended_precision {
-            self.read_limited_exp_golomb(rice_parameter.saturating_add(1), log2_transform_range)?
+        if prefix == 31 {
+            return Err(SyntaxError::InvalidSyntaxValue(
+                "coefficient remaining prefix exceeds CABAC limit",
+            ));
+        }
+        let rice = u32::from(rice_parameter);
+        let suffix_length = if prefix < 3 {
+            rice
         } else {
-            self.read_exp_golomb(rice_parameter.saturating_add(1))?
+            (prefix - 3)
+                .checked_add(rice)
+                .ok_or(SyntaxError::ExpGolombOverflow)?
         };
-        c_max
-            .checked_add(suffix)
-            .ok_or(SyntaxError::ExpGolombOverflow)
+        let suffix = if extended_precision && prefix >= 3 {
+            self.read_limited_exp_golomb(
+                rice_parameter.saturating_add(prefix.saturating_sub(3) as u8),
+                log2_transform_range,
+            )?
+        } else {
+            self.read_bypass_bits(suffix_length as usize)?
+        };
+        if prefix < 3 {
+            (u64::from(prefix) << rice)
+                .checked_add(suffix)
+                .ok_or(SyntaxError::ExpGolombOverflow)
+        } else {
+            let base = ((1_u64 << (prefix - 3)) + 2) << rice;
+            base.checked_add(suffix)
+                .ok_or(SyntaxError::ExpGolombOverflow)
+        }
     }
     fn cabac_bypass_alignment(&mut self) -> Result<(), SyntaxError> {
         self.align_bypass();
@@ -1444,6 +1491,13 @@ impl CabacReader for CabacDecoder<'_> {
     }
     fn read_terminate(&mut self) -> Result<u64, SyntaxError> {
         self.decode_terminate()
+    }
+    fn set_substream(
+        &mut self,
+        start_byte: usize,
+        end_byte: Option<usize>,
+    ) -> Result<(), SyntaxError> {
+        CabacDecoder::set_substream(self, start_byte, end_byte)
     }
     fn rbsp_slice_segment_trailing_bits(&mut self) -> Result<usize, SyntaxError> {
         self.read_rbsp_trailing_bits()
