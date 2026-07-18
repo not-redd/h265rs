@@ -270,7 +270,21 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     push_bits(&mut bits, 1, 1); // sps_temporal_mvp_enabled_flag
     push_bits(&mut bits, 0, 1); // strong_intra_smoothing_enabled_flag
     push_bits(&mut bits, 0, 1); // vui_parameters_present_flag
-    push_bits(&mut bits, 0, 1); // sps_extension_present_flag
+    push_bits(&mut bits, 1, 1); // sps_extension_present_flag
+    push_bits(&mut bits, 1, 1); // sps_range_extension_flag
+    push_bits(&mut bits, 0, 1); // sps_multilayer_extension_flag
+    push_bits(&mut bits, 0, 1); // sps_3d_extension_flag
+    push_bits(&mut bits, 0, 1); // sps_scc_extension_flag
+    push_bits(&mut bits, 0, 4); // sps_extension_4bits
+    push_bits(&mut bits, 1, 1); // transform_skip_rotation_enabled_flag
+    push_bits(&mut bits, 0, 1); // transform_skip_context_enabled_flag
+    push_bits(&mut bits, 1, 1); // implicit_rdpcm_enabled_flag
+    push_bits(&mut bits, 0, 1); // explicit_rdpcm_enabled_flag
+    push_bits(&mut bits, 1, 1); // extended_precision_processing_flag
+    push_bits(&mut bits, 0, 1); // intra_smoothing_disabled_flag
+    push_bits(&mut bits, 1, 1); // high_precision_offsets_enabled_flag
+    push_bits(&mut bits, 0, 1); // persistent_rice_adaptation_enabled_flag
+    push_bits(&mut bits, 1, 1); // cabac_bypass_alignment_enabled_flag
 
     let bytes = finish_bits(&bits);
     let mut reader = BitReader::new(&bytes);
@@ -291,7 +305,17 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     assert!(!sps.strong_intra_smoothing_enabled_flag);
     assert!(!sps.vui_parameters_present_flag);
     assert!(sps.vui_parameters.is_none());
-    assert!(!sps.sps_extension_present_flag);
+    assert!(sps.sps_extension_present_flag);
+    let extension = sps.sps_extension.as_ref().unwrap();
+    assert!(extension.sps_range_extension_flag);
+    assert!(!extension.sps_scc_extension_flag);
+    assert!(
+        extension
+            .range_extension
+            .as_ref()
+            .unwrap()
+            .transform_skip_rotation_enabled_flag
+    );
 }
 
 #[test]

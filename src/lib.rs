@@ -30,8 +30,8 @@ pub use syntax::{
     CpbEntry, HrdParameters, HrdSubLayerParameters, LongTermReferencePictureSetSyntax,
     NalUnitHeader, ParsedNalUnit, PcmSyntax, ProfileInfo, ProfileTierLevel, ScalingListData,
     ScalingListMatrix, SequenceParameterSetHeader, SequenceParameterSetSyntax,
-    ShortTermReferencePictureSet, SubLayerHrdParameters, SubLayerOrderingInfo,
-    SubLayerProfileLevel, SyntaxDescriptor, SyntaxError, SyntaxValue, VideoParameterSetHeader,
-    VuiParameters, VuiTimingInfo,
+    ShortTermReferencePictureSet, SpsExtensionSyntax, SpsRangeExtensionSyntax,
+    SubLayerHrdParameters, SubLayerOrderingInfo, SubLayerProfileLevel, SyntaxDescriptor,
+    SyntaxError, SyntaxValue, VideoParameterSetHeader, VuiParameters, VuiTimingInfo,
 };
 pub use tiles::TileLayout;

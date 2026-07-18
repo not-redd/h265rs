@@ -1,7 +1,7 @@
 use super::{
     parse_profile_tier_level, parse_short_term_reference_picture_set, parse_vui_parameters,
-    BitReader, ProfileTierLevel, ScalingListData, ShortTermReferencePictureSet, SyntaxError,
-    VuiParameters,
+    BitReader, ProfileTierLevel, ScalingListData, ShortTermReferencePictureSet, SpsExtensionSyntax,
+    SyntaxError, VuiParameters,
 };
 
 /// The parameter-set ordering values repeated for each sub-layer.
@@ -191,6 +191,8 @@ pub struct SequenceParameterSetSyntax {
     pub vui_parameters: Option<VuiParameters>,
     /// `sps_extension_present_flag`.
     pub sps_extension_present_flag: bool,
+    /// SPS extension selectors and range-extension syntax, when present.
+    pub sps_extension: Option<SpsExtensionSyntax>,
 }
 
 /// PCM fields from the optional SPS PCM syntax.
@@ -302,7 +304,8 @@ impl SequenceParameterSetHeader {
 impl SequenceParameterSetSyntax {
     /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM and
     /// short- and long-term reference picture-set syntax, VUI syntax, and the
-    /// SPS extension presence flag. The reader stops before SPS extensions.
+    /// SPS range-extension syntax. The reader stops before multilayer, 3D,
+    /// SCC, and extension-data syntax.
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
         let header = SequenceParameterSetHeader::parse(reader)?;
         let scaling_list_enabled_flag = reader.read_u(1)? != 0;
@@ -385,6 +388,11 @@ impl SequenceParameterSetSyntax {
             None
         };
         let sps_extension_present_flag = reader.read_u(1)? != 0;
+        let sps_extension = if sps_extension_present_flag {
+            Some(SpsExtensionSyntax::parse(reader)?)
+        } else {
+            None
+        };
         Ok(Self {
             header,
             scaling_list_enabled_flag,
@@ -403,6 +411,7 @@ impl SequenceParameterSetSyntax {
             vui_parameters_present_flag,
             vui_parameters,
             sps_extension_present_flag,
+            sps_extension,
         })
     }
 }
