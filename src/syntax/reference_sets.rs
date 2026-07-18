@@ -107,6 +107,9 @@ pub fn parse_short_term_reference_picture_set(
     } else {
         let num_negative_pics = reader.read_ue()?;
         let num_positive_pics = reader.read_ue()?;
+        let num_delta_pocs = num_negative_pics
+            .checked_add(num_positive_pics)
+            .ok_or(SyntaxError::InvalidSyntaxValue("too many delta POCs"))?;
         let mut delta_poc_s0_minus1 = Vec::with_capacity(num_negative_pics as usize);
         let mut used_by_curr_pic_s0_flag = Vec::with_capacity(num_negative_pics as usize);
         for _ in 0..num_negative_pics {
@@ -134,7 +137,7 @@ pub fn parse_short_term_reference_picture_set(
             used_by_curr_pic_s0_flag,
             delta_poc_s1_minus1,
             used_by_curr_pic_s1_flag,
-            num_delta_pocs: usize::try_from(num_negative_pics + num_positive_pics)
+            num_delta_pocs: usize::try_from(num_delta_pocs)
                 .map_err(|_| SyntaxError::InvalidSyntaxValue("too many delta POCs"))?,
         })
     }

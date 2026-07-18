@@ -176,6 +176,14 @@ pub struct SequenceParameterSetSyntax {
     pub num_short_term_ref_pic_sets: u64,
     /// Short-term reference picture sets in syntax-table order.
     pub short_term_ref_pic_sets: Vec<ShortTermReferencePictureSet>,
+    /// `long_term_ref_pics_present_flag`.
+    pub long_term_ref_pics_present_flag: bool,
+    /// Long-term reference-picture syntax when present.
+    pub long_term_ref_pic_set: Option<LongTermReferencePictureSetSyntax>,
+    /// `sps_temporal_mvp_enabled_flag`.
+    pub sps_temporal_mvp_enabled_flag: bool,
+    /// `strong_intra_smoothing_enabled_flag`.
+    pub strong_intra_smoothing_enabled_flag: bool,
 }
 
 /// PCM fields from the optional SPS PCM syntax.
@@ -191,6 +199,17 @@ pub struct PcmSyntax {
     pub log2_diff_max_min_pcm_luma_coding_block_size: u64,
     /// `pcm_loop_filter_disabled_flag`.
     pub loop_filter_disabled_flag: bool,
+}
+
+/// Long-term reference-picture syntax from the SPS.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LongTermReferencePictureSetSyntax {
+    /// `num_long_term_ref_pics_sps`.
+    pub num_long_term_ref_pics_sps: u64,
+    /// `lt_ref_pic_poc_lsb_sps` values.
+    pub poc_lsb_sps: Vec<u64>,
+    /// `used_by_curr_pic_lt_sps_flag` values.
+    pub used_by_curr_pic_lt_sps_flag: Vec<bool>,
 }
 
 impl SequenceParameterSetHeader {
@@ -275,8 +294,8 @@ impl SequenceParameterSetHeader {
 
 impl SequenceParameterSetSyntax {
     /// Parses the SPS common header, scaling-list data, AMP, SAO, PCM and
-    /// short-term reference picture-set syntax. The reader stops before
-    /// `long_term_ref_pics_present_flag`.
+    /// short- and long-term reference picture-set syntax. The reader stops
+    /// before `vui_parameters_present_flag`.
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self, SyntaxError> {
         let header = SequenceParameterSetHeader::parse(reader)?;
         let scaling_list_enabled_flag = reader.read_u(1)? != 0;
@@ -316,6 +335,39 @@ impl SequenceParameterSetSyntax {
                 set_count,
             )?);
         }
+        let long_term_ref_pics_present_flag = reader.read_u(1)? != 0;
+        let long_term_ref_pic_set = if long_term_ref_pics_present_flag {
+            let num_long_term_ref_pics_sps = reader.read_ue()?;
+            let count = usize::try_from(num_long_term_ref_pics_sps).map_err(|_| {
+                SyntaxError::InvalidSyntaxValue("too many long-term SPS reference pictures")
+            })?;
+            let poc_lsb_bits = header
+                .log2_max_pic_order_cnt_lsb_minus4
+                .checked_add(4)
+                .ok_or(SyntaxError::InvalidSyntaxValue(
+                    "POC LSB bit width overflows",
+                ))?;
+            if poc_lsb_bits > 64 {
+                return Err(SyntaxError::InvalidSyntaxValue(
+                    "POC LSB bit width must be at most 64",
+                ));
+            }
+            let mut poc_lsb_sps = Vec::with_capacity(count);
+            let mut used_by_curr_pic_lt_sps_flag = Vec::with_capacity(count);
+            for _ in 0..count {
+                poc_lsb_sps.push(reader.read_u(poc_lsb_bits as usize)?);
+                used_by_curr_pic_lt_sps_flag.push(reader.read_u(1)? != 0);
+            }
+            Some(LongTermReferencePictureSetSyntax {
+                num_long_term_ref_pics_sps,
+                poc_lsb_sps,
+                used_by_curr_pic_lt_sps_flag,
+            })
+        } else {
+            None
+        };
+        let sps_temporal_mvp_enabled_flag = reader.read_u(1)? != 0;
+        let strong_intra_smoothing_enabled_flag = reader.read_u(1)? != 0;
         Ok(Self {
             header,
             scaling_list_enabled_flag,
@@ -327,6 +379,10 @@ impl SequenceParameterSetSyntax {
             pcm,
             num_short_term_ref_pic_sets,
             short_term_ref_pic_sets,
+            long_term_ref_pics_present_flag,
+            long_term_ref_pic_set,
+            sps_temporal_mvp_enabled_flag,
+            strong_intra_smoothing_enabled_flag,
         })
     }
 }

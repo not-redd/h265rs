@@ -263,6 +263,12 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     push_ue(&mut bits, 0); // num_positive_pics
     push_ue(&mut bits, 0); // delta_poc_s0_minus1
     push_bits(&mut bits, 1, 1); // used_by_curr_pic_s0_flag
+    push_bits(&mut bits, 1, 1); // long_term_ref_pics_present_flag
+    push_ue(&mut bits, 1); // num_long_term_ref_pics_sps
+    push_bits(&mut bits, 5, 4); // lt_ref_pic_poc_lsb_sps
+    push_bits(&mut bits, 1, 1); // used_by_curr_pic_lt_sps_flag
+    push_bits(&mut bits, 1, 1); // sps_temporal_mvp_enabled_flag
+    push_bits(&mut bits, 0, 1); // strong_intra_smoothing_enabled_flag
 
     let bytes = finish_bits(&bits);
     let mut reader = BitReader::new(&bytes);
@@ -274,6 +280,13 @@ fn extended_sps_parser_reads_scaling_tools_and_pcm_boundary() {
     assert_eq!(sps.pcm.unwrap().sample_bit_depth_luma_minus1, 7);
     assert_eq!(sps.num_short_term_ref_pic_sets, 1);
     assert_eq!(sps.short_term_ref_pic_sets[0].num_delta_pocs, 1);
+    assert!(sps.long_term_ref_pics_present_flag);
+    assert_eq!(
+        sps.long_term_ref_pic_set.as_ref().unwrap().poc_lsb_sps,
+        vec![5]
+    );
+    assert!(sps.sps_temporal_mvp_enabled_flag);
+    assert!(!sps.strong_intra_smoothing_enabled_flag);
 }
 
 #[test]
