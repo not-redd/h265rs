@@ -75,7 +75,7 @@ fn decode_video(input: &str, output_dir: &str, frame_rate: u64) -> Result<(), Bo
             let Some(frame) = frame else {
                 continue;
             };
-            if decoded_frames % frames_per_output == 0 {
+            if decoded_frames.is_multiple_of(frames_per_output) {
                 let (rgb, width, height) = frame_to_rgb8(&frame)?;
                 let path = frame_path(output_dir, output_index);
                 write_jpeg(&rgb, width, height, &path)?;
@@ -117,10 +117,10 @@ fn decode_raw_nal(
     Ok(decoder.decode_nal(parsed)?)
 }
 
-fn split_length_prefixed_nals<'a>(
-    sample: &'a [u8],
+fn split_length_prefixed_nals(
+    sample: &[u8],
     nal_length_size: usize,
-) -> Result<Vec<&'a [u8]>, Box<dyn Error>> {
+) -> Result<Vec<&[u8]>, Box<dyn Error>> {
     if !(1..=4).contains(&nal_length_size) {
         return Err("NAL length size must be 1..=4".into());
     }
@@ -289,7 +289,7 @@ fn read_moov(file: &mut File, file_size: u64) -> Result<Vec<u8>, Box<dyn Error>>
         if &header[4..8] == b"moov" {
             let content_size = usize::try_from(size - header_size)?;
             let mut content = vec![0u8; content_size];
-            file.seek(SeekFrom::Start(position + header_size as u64))?;
+            file.seek(SeekFrom::Start(position + header_size))?;
             file.read_exact(&mut content)?;
             return Ok(content);
         }
