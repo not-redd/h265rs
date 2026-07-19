@@ -50,6 +50,15 @@ impl SamplePlane {
         &mut self.samples
     }
 
+    #[cfg(feature = "simd")]
+    pub(super) fn row(&self, y: usize) -> Option<&[i32]> {
+        if y >= self.height as usize {
+            return None;
+        }
+        let start = y * self.width as usize;
+        Some(&self.samples[start..start + self.width as usize])
+    }
+
     /// Reads a sample, returning `None` outside the plane.
     pub fn get(&self, x: i32, y: i32) -> Option<i32> {
         if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
@@ -76,17 +85,24 @@ impl SamplePlane {
 
     /// Copies a rectangular block into this plane, clipping the destination.
     pub fn write_block(&mut self, block: Block, values: &[i32]) {
-        for y in 0..block.height {
-            for x in 0..block.width {
-                let source = y as usize * block.width as usize + x as usize;
-                if source < values.len() {
-                    self.set(
-                        block.x as i32 + x as i32,
-                        block.y as i32 + y as i32,
-                        values[source],
-                    );
-                }
+        if block.x >= self.width || block.y >= self.height {
+            return;
+        }
+        let copy_width = block.width.min(self.width - block.x) as usize;
+        let copy_height = block.height.min(self.height - block.y) as usize;
+        let source_stride = block.width as usize;
+        let destination_stride = self.width as usize;
+        for row in 0..copy_height {
+            let source_start = row * source_stride;
+            let available = values.len().saturating_sub(source_start);
+            let row_width = copy_width.min(available);
+            if row_width == 0 {
+                break;
             }
+            let destination_start =
+                (block.y as usize + row) * destination_stride + block.x as usize;
+            self.samples[destination_start..destination_start + row_width]
+                .copy_from_slice(&values[source_start..source_start + row_width]);
         }
     }
 

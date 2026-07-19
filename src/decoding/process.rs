@@ -1,5 +1,6 @@
+use super::filters::apply_sao_ctb_into;
 use super::{
-    apply_deblocking_edge, apply_sao_ctb, derive_picture_order_count, inter_predict, intra_predict,
+    apply_deblocking_edge, derive_picture_order_count, inter_predict, intra_predict,
     inverse_transform, reconstruct_block, scale_transform_coefficients, DeblockingParameters,
     DecodedPicture, DecodedPictureBuffer, EdgeDirection, IntraPredictionMode, IntraReferences,
     PictureMarking, PredictionLists, ReferenceSet, SamplePlane, SaoBlock, TransformParameters,
@@ -313,25 +314,15 @@ impl PictureDecodeContext {
         let height = self.ctb_size.min(plane.height());
         for y in (0..plane.height()).step_by(self.ctb_size as usize) {
             for x in (0..plane.width()).step_by(self.ctb_size as usize) {
-                let filtered = apply_sao_ctb(
+                apply_sao_ctb_into(
                     plane,
+                    &mut output,
                     x,
                     y,
                     width.min(plane.width() - x),
                     height.min(plane.height() - y),
                     parameters,
                 );
-                for row in 0..filtered.height() {
-                    for column in 0..filtered.width() {
-                        output.set(
-                            x as i32 + column as i32,
-                            y as i32 + row as i32,
-                            filtered
-                                .get(x as i32 + column as i32, y as i32 + row as i32)
-                                .unwrap_or(0),
-                        );
-                    }
-                }
             }
         }
         output

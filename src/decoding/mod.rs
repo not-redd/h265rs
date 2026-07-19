@@ -11,6 +11,8 @@ mod intra;
 mod picture;
 mod process;
 mod reference;
+#[cfg(feature = "simd")]
+mod simd;
 mod transform;
 
 pub use filters::{

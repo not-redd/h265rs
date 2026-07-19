@@ -1,5 +1,6 @@
 use super::clip_sample;
 use crate::Block;
+use std::sync::OnceLock;
 
 /// Parameters used by §§8.6.2–8.6.4.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,21 +55,25 @@ pub fn inverse_transform(
 ) -> Vec<i32> {
     assert_eq!(coefficients.len(), size * size);
     let mut intermediate = vec![0_i64; size * size];
+    let mut column = vec![0_i64; size];
+    let mut transformed = vec![0_i64; size];
     for x in 0..size {
-        let column: Vec<i64> = (0..size)
-            .map(|row| i64::from(coefficients[row * size + x]))
-            .collect();
-        let transformed = one_dimensional_transform(&column, size, intra_4x4 && size == 4);
+        for row in 0..size {
+            column[row] = i64::from(coefficients[row * size + x]);
+        }
+        one_dimensional_transform(&column, size, intra_4x4 && size == 4, &mut transformed);
         for row in 0..size {
             intermediate[row * size + x] = transformed[row];
         }
     }
     let mut output = vec![0; size * size];
+    let mut line = vec![0_i64; size];
     for row in 0..size {
-        let line = one_dimensional_transform(
+        one_dimensional_transform(
             &intermediate[row * size..(row + 1) * size],
             size,
             intra_4x4 && size == 4,
+            &mut line,
         );
         for column in 0..size {
             output[row * size + column] = clip_signed(line[column], i32::from(bit_depth) + 7);
@@ -77,26 +82,65 @@ pub fn inverse_transform(
     output
 }
 
-fn one_dimensional_transform(input: &[i64], size: usize, intra_4x4: bool) -> Vec<i64> {
-    let matrix_4 = [
+fn one_dimensional_transform(input: &[i64], size: usize, intra_4x4: bool, output: &mut [i64]) {
+    const MATRIX_4: [[i64; 4]; 4] = [
         [29_i64, 55, 74, 84],
         [74, 74, 0, -74],
         [84, -29, -74, 55],
         [55, -84, 74, -29],
     ];
+    let matrix = (!intra_4x4).then(|| transform_matrix(size)).flatten();
+    #[cfg(feature = "simd")]
+    let simd_safe = input
+        .iter()
+        .map(|value| value.unsigned_abs())
+        .max()
+        .unwrap_or(0)
+        .checked_mul(90)
+        .and_then(|value| value.checked_mul(size as u64))
+        .is_some_and(|value| value <= i32::MAX as u64);
+    for row in 0..size {
+        let coefficients: &[i64] = if intra_4x4 {
+            &MATRIX_4[row]
+        } else if let Some(matrix) = matrix {
+            &matrix[row * size..(row + 1) * size]
+        } else {
+            output[row] = (0..size)
+                .map(|column| transform_coefficient(size, row, column) * input[column])
+                .sum();
+            continue;
+        };
+        #[cfg(feature = "simd")]
+        if simd_safe {
+            output[row] = super::simd::dot_product_i64(input, coefficients);
+            continue;
+        }
+        output[row] = coefficients
+            .iter()
+            .zip(input)
+            .map(|(&coefficient, &value)| coefficient * value)
+            .sum();
+    }
+}
+
+fn transform_matrix(size: usize) -> Option<&'static [i64]> {
+    static MATRIX_4: OnceLock<Vec<i64>> = OnceLock::new();
+    static MATRIX_8: OnceLock<Vec<i64>> = OnceLock::new();
+    static MATRIX_16: OnceLock<Vec<i64>> = OnceLock::new();
+    static MATRIX_32: OnceLock<Vec<i64>> = OnceLock::new();
+    let matrix = match size {
+        4 => &MATRIX_4,
+        8 => &MATRIX_8,
+        16 => &MATRIX_16,
+        32 => &MATRIX_32,
+        _ => return None,
+    };
+    Some(matrix.get_or_init(|| build_transform_matrix(size)))
+}
+
+fn build_transform_matrix(size: usize) -> Vec<i64> {
     (0..size)
-        .map(|row| {
-            (0..size)
-                .map(|column| {
-                    let coefficient = if intra_4x4 {
-                        matrix_4[row][column]
-                    } else {
-                        transform_coefficient(size, row, column)
-                    };
-                    coefficient * input[column]
-                })
-                .sum()
-        })
+        .flat_map(|row| (0..size).map(move |column| transform_coefficient(size, row, column)))
         .collect()
 }
 

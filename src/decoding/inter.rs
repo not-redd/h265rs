@@ -1,6 +1,24 @@
 use super::{clip_sample, DecodedPicture, SamplePlane};
 use crate::{Block, ChromaFormat};
 
+pub(super) const LUMA_FILTERS: [[i32; 8]; 4] = [
+    [0, 0, 0, 64, 0, 0, 0, 0],
+    [-1, 4, -10, 58, 17, -5, 1, 0],
+    [-1, 4, -11, 40, 40, -11, 4, -1],
+    [0, 1, -5, 17, 58, -10, 4, -1],
+];
+
+pub(super) const CHROMA_FILTERS: [[i32; 4]; 8] = [
+    [0, 64, 0, 0],
+    [-2, 58, 10, -2],
+    [-4, 54, 16, -2],
+    [-6, 46, 28, -4],
+    [-4, 36, 36, -4],
+    [-4, 28, 46, -6],
+    [-2, 16, 54, -4],
+    [-2, 10, 58, -2],
+];
+
 /// Motion vector in quarter-luma-sample units.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MotionVector {
@@ -213,19 +231,32 @@ fn fill_prediction(
 ) {
     let width = (block.width / scale_x.max(1)) as usize;
     let height = (block.height / scale_y.max(1)) as usize;
+    let (fraction_bits, mv_x, mv_y) = if scale_x == 1 {
+        (2, mv.x, mv.y)
+    } else {
+        (3, mv.x * 2 / scale_x as i32, mv.y * 2 / scale_y as i32)
+    };
+    let x_frac = (mv_x & ((1 << fraction_bits) - 1)) as u8;
+    let y_frac = (mv_y & ((1 << fraction_bits) - 1)) as u8;
+    let start_x = (block.x / scale_x) as i32 + (mv_x >> fraction_bits);
+    let start_y = (block.y / scale_y) as i32 + (mv_y >> fraction_bits);
+    #[cfg(feature = "simd")]
+    if bit_depth <= 16 {
+        if fraction_bits == 2 {
+            super::simd::fill_luma_prediction(
+                plane, start_x, start_y, width, height, x_frac, y_frac, bit_depth, output,
+            );
+        } else {
+            super::simd::fill_chroma_prediction(
+                plane, start_x, start_y, width, height, x_frac, y_frac, bit_depth, output,
+            );
+        }
+        return;
+    }
     for y in 0..height {
         for x in 0..width {
-            let x_luma = block.x / scale_x + x as u32;
-            let y_luma = block.y / scale_y + y as u32;
-            let (fraction_bits, mv_x, mv_y) = if scale_x == 1 {
-                (2, mv.x, mv.y)
-            } else {
-                (3, mv.x * 2 / scale_x as i32, mv.y * 2 / scale_y as i32)
-            };
-            let x_int = x_luma as i32 + (mv_x >> fraction_bits);
-            let y_int = y_luma as i32 + (mv_y >> fraction_bits);
-            let x_frac = (mv_x & ((1 << fraction_bits) - 1)) as u8;
-            let y_frac = (mv_y & ((1 << fraction_bits) - 1)) as u8;
+            let x_int = start_x + x as i32;
+            let y_int = start_y + y as i32;
             output[y * width + x] = if fraction_bits == 2 {
                 fractional_luma_sample(plane, x_int, y_int, x_frac, y_frac, bit_depth)
             } else {
@@ -248,6 +279,20 @@ pub fn default_weighted_prediction(
     let shift2 = u32::from((15_i32 - i32::from(bit_depth)).max(3) as u8);
     let offset1 = 1_i64 << shift1.saturating_sub(1);
     let offset2 = 1_i64 << shift2.saturating_sub(1);
+    #[cfg(feature = "simd")]
+    if bit_depth <= 16 {
+        return super::simd::default_weighted_prediction(
+            l0,
+            l1,
+            has0,
+            has1,
+            shift1,
+            shift2,
+            offset1 as i32,
+            offset2 as i32,
+            ((1_i64 << bit_depth) - 1) as i32,
+        );
+    }
     l0.iter()
         .zip(l1)
         .map(|(&a, &b)| {
@@ -310,17 +355,10 @@ pub fn fractional_luma_sample(
     if frac_x == 0 && frac_y == 0 {
         return clip_sample(i64::from(plane.get_clipped(x, y)), bit_depth);
     }
-    let horizontal = [
-        [0, 0, 0, 64, 0, 0, 0, 0],
-        [-1, 4, -10, 58, 17, -5, 1, 0],
-        [-1, 4, -11, 40, 40, -11, 4, -1],
-        [0, 1, -5, 17, 58, -10, 4, -1],
-    ];
-    let vertical = horizontal;
     let sample = if frac_y == 0 {
-        filter_1d(plane, x, y, frac_x, &horizontal[frac_x as usize])
+        filter_1d(plane, x, y, frac_x, &LUMA_FILTERS[frac_x as usize])
     } else if frac_x == 0 {
-        filter_1d_vertical(plane, x, y, frac_y, &vertical[frac_y as usize])
+        filter_1d_vertical(plane, x, y, frac_y, &LUMA_FILTERS[frac_y as usize])
     } else {
         let mut intermediate = [0_i64; 8];
         for (index, item) in intermediate.iter_mut().enumerate() {
@@ -329,10 +367,10 @@ pub fn fractional_luma_sample(
                 x,
                 y + index as i32 - 3,
                 frac_x,
-                &horizontal[frac_x as usize],
+                &LUMA_FILTERS[frac_x as usize],
             );
         }
-        let sum: i64 = vertical[frac_y as usize]
+        let sum: i64 = LUMA_FILTERS[frac_y as usize]
             .iter()
             .enumerate()
             .map(|(index, &coefficient)| i64::from(coefficient) * intermediate[index])
@@ -379,21 +417,11 @@ pub fn fractional_chroma_sample(
     frac_y: u8,
     bit_depth: u8,
 ) -> i32 {
-    const FILTERS: [[i32; 4]; 8] = [
-        [0, 64, 0, 0],
-        [-2, 58, 10, -2],
-        [-4, 54, 16, -2],
-        [-6, 46, 28, -4],
-        [-4, 36, 36, -4],
-        [-4, 28, 46, -6],
-        [-2, 16, 54, -4],
-        [-2, 10, 58, -2],
-    ];
     if frac_x == 0 && frac_y == 0 {
         return clip_sample(i64::from(plane.get_clipped(x, y)), bit_depth);
     }
     let horizontal = |xx: i32, yy: i32| -> i64 {
-        FILTERS[frac_x as usize]
+        CHROMA_FILTERS[frac_x as usize]
             .iter()
             .enumerate()
             .map(|(i, &c)| i64::from(c) * i64::from(plane.get_clipped(xx + i as i32 - 1, yy)))
@@ -403,15 +431,15 @@ pub fn fractional_chroma_sample(
     let value = if frac_y == 0 {
         horizontal(x, y)
     } else if frac_x == 0 {
-        FILTERS[frac_y as usize]
+        CHROMA_FILTERS[frac_y as usize]
             .iter()
             .enumerate()
             .map(|(i, &c)| i64::from(c) * i64::from(plane.get_clipped(x, y + i as i32 - 1)))
             .sum::<i64>()
             >> 6
     } else {
-        let values: Vec<i64> = (-1..=2).map(|offset| horizontal(x, y + offset)).collect();
-        FILTERS[frac_y as usize]
+        let values: [i64; 4] = std::array::from_fn(|index| horizontal(x, y + index as i32 - 1));
+        CHROMA_FILTERS[frac_y as usize]
             .iter()
             .enumerate()
             .map(|(i, &c)| i64::from(c) * values[i])

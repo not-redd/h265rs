@@ -432,9 +432,8 @@ impl HevcDecoder {
                 cabac_zero_word_count: 0,
             });
         };
-        let slice_qp =
-            (26_i64 + (pps.init_qp_minus26) + parsed_header.slice_qp_delta.unwrap_or(0))
-                .clamp(0, 51) as i32;
+        let slice_qp = (26_i64 + (pps.init_qp_minus26) + parsed_header.slice_qp_delta.unwrap_or(0))
+            .clamp(0, 51) as i32;
         let init_type = derive_cabac_init_type(
             slice_type as u8,
             parsed_header.cabac_init_flag.unwrap_or(false),
@@ -678,9 +677,8 @@ impl HevcDecoder {
         let mut picture = DecodedPicture::new(format);
         let (ctb_log2, _, _) = ctb_geometry_for_decoder(sps)?;
         let context = PictureDecodeContext::new(format, 1_u32 << ctb_log2);
-        let qp =
-            (26_i64 + (pps.init_qp_minus26) + parsed.header.slice_qp_delta.unwrap_or(0))
-                .clamp(0, 51) as i32;
+        let qp = (26_i64 + (pps.init_qp_minus26) + parsed.header.slice_qp_delta.unwrap_or(0))
+            .clamp(0, 51) as i32;
         if let Some(data) = parsed.data.as_ref() {
             for ctu in &data.coding_tree_units {
                 reconstruct_intra_tree(

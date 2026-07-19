@@ -130,6 +130,30 @@ pub fn apply_sao_ctb(
     parameters: &SaoBlock,
 ) -> SamplePlane {
     let mut output = input.clone();
+    apply_sao_ctb_into(
+        input,
+        &mut output,
+        block_x,
+        block_y,
+        width,
+        height,
+        parameters,
+    );
+    output
+}
+
+pub(super) fn apply_sao_ctb_into(
+    input: &SamplePlane,
+    output: &mut SamplePlane,
+    block_x: u32,
+    block_y: u32,
+    width: u32,
+    height: u32,
+    parameters: &SaoBlock,
+) {
+    if parameters.kind == SaoType::None {
+        return;
+    }
     for y in 0..height {
         for x in 0..width {
             let px = block_x as i32 + x as i32;
@@ -181,5 +205,4 @@ pub fn apply_sao_ctb(
             );
         }
     }
-    output
 }

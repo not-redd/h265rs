@@ -4,7 +4,8 @@ use h265rs::{
     apply_deblocking_edge, apply_sao_ctb, derive_chroma_intra_mode, derive_luma_intra_mode,
     derive_picture_order_count, fractional_luma_sample, intra_predict, inverse_transform,
     reconstruct_block, residual_bypass, Block, ChromaFormat, DeblockingParameters, EdgeDirection,
-    IntraPredictionMode, IntraReferences, PictureFormat, SamplePlane, SaoBlock, SaoType,
+    IntraPredictionMode, IntraReferences, PictureDecodeContext, PictureFormat, SamplePlane,
+    SaoBlock, SaoType,
 };
 
 fn format() -> PictureFormat {
@@ -122,4 +123,38 @@ fn format_is_used_by_chapter8_picture_storage() {
     let picture = h265rs::DecodedPicture::new(format());
     assert_eq!(picture.plane(0).unwrap().width(), 16);
     assert_eq!(picture.plane(1).unwrap().width(), 8);
+}
+
+#[test]
+fn block_writes_copy_rows_and_clip_to_the_plane() {
+    let mut plane = SamplePlane::new(4, 3, 0);
+    plane.write_block(
+        Block {
+            x: 2,
+            y: 1,
+            width: 3,
+            height: 2,
+        },
+        &[1, 2, 3, 4, 5, 6],
+    );
+    assert_eq!(plane.samples(), &[0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 4, 5]);
+}
+
+#[test]
+fn sao_plane_filters_each_ctb_without_changing_copy_semantics() {
+    let format = PictureFormat::new(8, 4, 8, 8, ChromaFormat::Monochrome, false).unwrap();
+    let context = PictureDecodeContext::new(format, 4);
+    let plane = SamplePlane::from_samples(8, 4, (0..32).map(|index| 8 + (index % 8) * 8).collect())
+        .unwrap();
+    let parameters = SaoBlock {
+        kind: SaoType::Band,
+        band_position: 1,
+        edge_class: 0,
+        offsets: [0, 3, -2, 1, -1],
+        bit_depth: 8,
+    };
+    assert_eq!(
+        context.sao_plane(&plane, &parameters),
+        apply_sao_ctb(&plane, 0, 0, 8, 4, &parameters)
+    );
 }
